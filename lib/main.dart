@@ -63,6 +63,9 @@ class _HomePageState extends State<HomePage> {
   String? _searchError;
   int? _selectedResultIndex;
 
+  // Added flights state
+  List<({ScheduledFlight flight, Appendix? appendix})> _addedFlights = [];
+
   // Cape Town / Brackenfell area - default location from Figma
   static const LatLng _defaultLocation = LatLng(-33.8688, 18.7029);
 
@@ -197,7 +200,7 @@ class _HomePageState extends State<HomePage> {
           _appendix = null;
         });
         debugPrint('[Airtime] No flights found');
-      } else {
+        } else {
         setState(() {
           _searchResults = response.scheduledFlights;
           _appendix = response.appendix;
@@ -231,9 +234,9 @@ class _HomePageState extends State<HomePage> {
     final selectedFlight = _searchResults[_selectedResultIndex!];
     debugPrint('[Airtime] User accepted flight: ${selectedFlight.fullFlightNumber}');
     
-    // TODO: Add the flight to user's list (will be implemented later)
-    // For now, just reset the state
+    // Add the flight to added flights list
     setState(() {
+      _addedFlights.add((flight: selectedFlight, appendix: _appendix));
       _isAddingFlight = false;
       _hasSearched = false;
       _searchResults = [];
@@ -393,7 +396,7 @@ class _HomePageState extends State<HomePage> {
                 bottom: 0,
                 child: Container(
                   color: Colors.white,
-                  child: (!_hasSearched || _searchResults.isEmpty) 
+                  child: _addedFlights.isEmpty
                     ? Center(
                         child: Text(
                           'No flights added yet',
@@ -405,7 +408,7 @@ class _HomePageState extends State<HomePage> {
                           ),
                         ),
                       )
-                    : const SizedBox.shrink(),
+                    : _buildAddedFlightsList(),
                 ),
               ),
 
@@ -509,8 +512,8 @@ class _HomePageState extends State<HomePage> {
               blurRadius: 64,
               offset: const Offset(0, 4),
             ),
-          ],
-        ),
+        ],
+      ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -531,7 +534,7 @@ class _HomePageState extends State<HomePage> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
-                  children: [
+            children: [
                     Text(
                       'Sign in with Google',
                       style: GoogleFonts.balooBhai2(
@@ -892,6 +895,82 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _buildAddedFlightsList() {
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: _addedFlights.length,
+      itemBuilder: (context, index) {
+        final added = _addedFlights[index];
+        final flight = added.flight;
+        final appendix = added.appendix;
+        
+        final airlineName = appendix?.getAirline(flight.carrierFsCode)?.name ?? flight.carrierFsCode;
+        final destinationCity = appendix?.getAirport(flight.arrivalAirportFsCode)?.city ?? flight.arrivalAirportFsCode;
+        final departureTime = flight.departureDateTime;
+        
+        return Container(
+          width: 390,
+          height: 98,
+          color: Colors.white,
+          child: Stack(
+            children: [
+              Positioned(
+                left: 17,
+                top: 19,
+                child: Text(
+                  airlineName,
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.black,
+                    height: 23 / 17,
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 17,
+                top: 46,
+                child: Text(
+                  'To $destinationCity',
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 27,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black,
+                    height: 33 / 27,
+                  ),
+                ),
+              ),
+              Positioned(
+                right: 19,
+                bottom: 29,
+                child: Container(
+                  padding: const EdgeInsets.only(left: 7, right: 7, top: 7, bottom: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(
+                      color: _accentGreen,
+                      width: 3,
+                    ),
+                  ),
+                  child: Text(
+                    _formatTime(departureTime),
+                    style: GoogleFonts.balooBhai2(
+                      fontSize: 31,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black,
+                      height: 35 / 31,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildActionContainer() {
     // Action container from Figma: 
     // bg-black, h-79, w-390, top 727px
@@ -1100,9 +1179,9 @@ class _HomePageState extends State<HomePage> {
                   ),
                 );
               },
-            ),
           ),
         ),
+      ),
       ],
     );
   }
