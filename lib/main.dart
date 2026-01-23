@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
+import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
 import 'services/auth_service.dart';
 import 'services/cirium_api_service.dart';
 import 'models/schedule.dart';
@@ -11,6 +14,14 @@ import 'models/common.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Google Maps with latest renderer for cloud-based styling
+  final GoogleMapsFlutterPlatform mapsImplementation = GoogleMapsFlutterPlatform.instance;
+  if (mapsImplementation is GoogleMapsFlutterAndroid) {
+    mapsImplementation.useAndroidViewSurface = true;
+    await mapsImplementation.initializeWithRenderer(AndroidMapRenderer.latest);
+    debugPrint('[Airtime] Google Maps Android renderer initialized');
+  }
 
   debugPrint('[Airtime] Initializing Firebase...');
   await Firebase.initializeApp();
@@ -381,7 +392,7 @@ class _HomePageState extends State<HomePage> {
                   onMapCreated: (controller) {
                     _mapController = controller;
                   },
-                  mapType: MapType.normal,
+                  cloudMapId: '62f0e28a3bd3ee4c493ea929',
                   zoomControlsEnabled: false,
                   myLocationButtonEnabled: false,
                   compassEnabled: false,
@@ -1222,29 +1233,36 @@ class FlightTrackingPage extends StatefulWidget {
 class _FlightTrackingPageState extends State<FlightTrackingPage> {
   final CiriumApiService _ciriumService = CiriumApiService();
   GoogleMapController? _mapController;
+  final ScrollController _scrollController = ScrollController();
   
   bool _isLoading = true;
   FlightStatus? _flightStatus;
   Appendix? _statusAppendix;
+  double _scrollOffset = 0;
 
-  // Colors from Figma
+  // Colors from Figma - exact values
   static const Color _accentGreen = Color(0xFF34C759);
   static const Color _backgroundLight = Color(0xFFF1F5EB);
   static const Color _cardWhite = Color(0xFFFDFFFA);
   static const Color _flightBadgeBlue = Color(0xFF15357E);
   static const Color _flightBadgeTextBlue = Color(0xFFDCFBFF);
   static const Color _terminalRed = Color(0xFFFF383C);
-  static const Color _gateGold = Color(0xFF6E5D1A);
-  static const Color _gateTextGold = Color(0xFFFFFFDC);
+  static const Color _gateOrange = Color(0xFFF14D00); // Primary/Scapia/400
   static const Color _beltNavy = Color(0xFF202269);
   static const Color _arrivalTimeBg = Color(0xFFE7EBD9);
-  static const Color _aircraftBg = Colors.black;
-  static const Color _aircraftText = Color(0xFFE7EBD9);
+  static const Color _aircraftBg = Color(0xFFFDFFFA); // Same as cardWhite
 
   @override
   void initState() {
     super.initState();
     _fetchFlightStatus();
+    _scrollController.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    setState(() {
+      _scrollOffset = _scrollController.offset;
+    });
   }
 
   Future<void> _fetchFlightStatus() async {
@@ -1376,6 +1394,10 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
     return _flightStatus?.airportResources?.departureGate;
   }
 
+  String? get _arrivalGate {
+    return _flightStatus?.airportResources?.arrivalGate;
+  }
+
   String? get _arrivalBaggage {
     return _flightStatus?.airportResources?.baggage;
   }
@@ -1408,6 +1430,8 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   @override
   void dispose() {
     _mapController?.dispose();
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     _ciriumService.dispose();
     super.dispose();
   }
@@ -1415,189 +1439,223 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
+    final statusBarHeight = MediaQuery.of(context).padding.top;
+    
+    // Calculate floating elements position based on scroll
+    // Initial positions from Figma
+    const double initialBadgeTop = 244.0;
+    const double initialCardTop = 281.0;
+    const double mapHeight = 386.0;
+    
+    // When scrolled, badge and card should move up but stay visible
+    // In scrolled state: badge is at top (after status bar), card follows
+    final double scrolledBadgeTop = statusBarHeight + 16;
+    final double scrolledCardTop = statusBarHeight + 80; // Below badge
+    
+    // Calculate current position based on scroll
+    final double badgeTop = initialBadgeTop - (_scrollOffset * 0.8).clamp(0, initialBadgeTop - scrolledBadgeTop);
+    final double cardTop = initialCardTop - (_scrollOffset * 0.8).clamp(0, initialCardTop - scrolledCardTop);
+    
+    // Back button visibility: show standalone when not scrolled, hide when scrolled (integrated into badge)
+    final bool showStandaloneBackButton = _scrollOffset < 100;
+    final bool showIntegratedBackButton = _scrollOffset >= 100;
     
     return Scaffold(
       body: Container(
         color: _backgroundLight,
         child: _isLoading
             ? const Center(child: CircularProgressIndicator(color: _accentGreen))
-            : SingleChildScrollView(
-                child: SizedBox(
-                  width: screenWidth,
-                  // Height must accommodate all positioned children
-                  // With stops: aircraft at 870 + 93 = 963, without: 719 + 93 = 812
-                  // Add extra padding for safety
-                  height: widget.flight.stops > 0 ? 1000 : 850,
-                  child: Stack(
-                    children: [
-                      // Map at top
-              SizedBox(
-                        height: 386,
-                        width: screenWidth,
-                        child: GoogleMap(
-                          initialCameraPosition: CameraPosition(
-                            target: _getDestinationLatLng(),
-                            zoom: 10.0,
-                          ),
-                          onMapCreated: (controller) {
-                            _mapController = controller;
-                          },
-                          mapType: MapType.normal,
-                          zoomControlsEnabled: false,
-                          myLocationButtonEnabled: false,
-                          compassEnabled: false,
-                          mapToolbarEnabled: false,
-                        ),
-                      ),
-                      
-                      // Back button - top left
-                      Positioned(
-                        left: 16,
-                        top: 60,
-                        child: GestureDetector(
-                          onTap: () => Navigator.pop(context),
-                          child: Container(
-                            width: 48,
-                            height: 48,
-                            decoration: const BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
+            : Stack(
+                children: [
+                  // LAYER 1: Scrollable content
+                  SingleChildScrollView(
+                    controller: _scrollController,
+                    child: Column(
+                      children: [
+                        // Map at top
+                        SizedBox(
+                          height: mapHeight,
+                          width: screenWidth,
+                          child: GoogleMap(
+                            initialCameraPosition: CameraPosition(
+                              target: _getDestinationLatLng(),
+                              zoom: 10.0,
                             ),
-                            child: const Center(
-                              child: Icon(
-                                CupertinoIcons.chevron_left,
-                                size: 23,
-                                color: Colors.black,
-                              ),
-                            ),
+                            onMapCreated: (controller) {
+                              _mapController = controller;
+                            },
+                            cloudMapId: '62f0e28a3bd3ee4c493ea929',
+                            zoomControlsEnabled: false,
+                            myLocationButtonEnabled: false,
+                            compassEnabled: false,
+                            mapToolbarEnabled: false,
                           ),
                         ),
-                      ),
-                      
-                      // Flight number badge
-                      Positioned(
-                        left: 24,
-                        top: 244,
-                        child: Container(
-                          padding: const EdgeInsets.only(left: 9, right: 9, top: 9, bottom: 4),
-                          decoration: BoxDecoration(
-                            color: _flightBadgeBlue,
-                            borderRadius: BorderRadius.circular(13),
-                          ),
-                          child: Text(
-                            widget.flight.fullFlightNumber,
-                            style: GoogleFonts.balooBhai2(
-                              fontSize: 37,
-                              fontWeight: FontWeight.w800,
-                              color: _flightBadgeTextBlue,
-                            ),
-                          ),
-                        ),
-                      ),
-                      
-                      // Journey info card
-                      Positioned(
-                        left: 7,
-                        top: 281,
-                        child: Container(
-                          width: 376,
-                          height: 138,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(23),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.17),
-                                blurRadius: 84,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Stack(
-                            children: [
-                              // Destination
-                              Positioned(
-                                left: 17,
-                                top: 38,
-                                child: Text(
-                                  'To  ${_getDestinationCity()}',
-                                  style: GoogleFonts.balooBhai2(
-                                    fontSize: 29,
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.black,
-                                    height: 45 / 29,
-                                  ),
-                                ),
-                              ),
-                              // Date
-                              Positioned(
-                                left: 17,
-                                bottom: 23,
-                                child: Text(
-                                  _formatDate(_departureTime),
-                                  style: GoogleFonts.balooBhai2(
-                                    fontSize: 23,
-                                    fontWeight: FontWeight.w600,
-                                    color: Colors.black,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      
-                      // Departure info section
-                      Positioned(
-                        left: 0,
-                        top: 386,
-                        child: _buildDepartureSection(screenWidth),
-                      ),
-                      
-                      // Stop info section (only if there are stops)
-                      // Figma: top 572px, h 112px
-                      if (widget.flight.stops > 0)
-                        Positioned(
-                          left: 0,
-                          top: 572,
-                          child: _buildStopSection(screenWidth),
-                        ),
-                      
-                      // Arrival info section
-                      // Figma: top 697px (with stop) or 559px (without stop), h 160px
-                      Positioned(
-                        left: 0,
-                        top: widget.flight.stops > 0 ? 697 : 559,
-                        child: _buildArrivalSection(screenWidth),
-                      ),
-                      
-                      // Aircraft info section
-                      // Figma: top 870px (with stop) or 719px (without stop), h 93px
-                      if (_aircraftName != null || _aircraftCode != null)
-                        Positioned(
-                          left: 0,
-                          top: widget.flight.stops > 0 ? 870 : 719,
-                          child: _buildAircraftSection(screenWidth),
-                        ),
-                    ],
+                        
+                        // Departure info section (starts right after map)
+                        _buildDepartureSection(screenWidth),
+                        
+                        // Arrival info section
+                        _buildArrivalSection(screenWidth),
+                        
+                        // Aircraft info section
+                        if (_aircraftName != null || _aircraftCode != null)
+                          _buildAircraftSection(screenWidth),
+                        
+                        // Bottom padding + home indicator space
+                        SizedBox(height: 34 + MediaQuery.of(context).padding.bottom),
+                      ],
+                    ),
                   ),
-          ),
-        ),
+                  
+                  // LAYER 2: Floating flight badge (always on top)
+                  Positioned(
+                    left: showIntegratedBackButton ? 24 : 24,
+                    top: badgeTop,
+                    child: GestureDetector(
+                      onTap: showIntegratedBackButton ? () => Navigator.pop(context) : null,
+                      child: Container(
+                        padding: EdgeInsets.only(
+                          left: showIntegratedBackButton ? 13 : 13,
+                          right: 13,
+                          top: 7,
+                          bottom: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _flightBadgeBlue,
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Integrated back button when scrolled
+                            if (showIntegratedBackButton) ...[
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: const BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Center(
+                                  child: Icon(
+                                    CupertinoIcons.chevron_left,
+                                    size: 20,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            Text(
+                              widget.flight.fullFlightNumber,
+                              style: GoogleFonts.balooBhai2(
+                                fontSize: 37,
+                                fontWeight: FontWeight.w800,
+                                color: _flightBadgeTextBlue,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  
+                  // LAYER 3: Floating journey info card (always on top)
+                  Positioned(
+                    left: 7,
+                    top: cardTop,
+                    child: Container(
+                      width: 376,
+                      height: 138,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(23),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.17),
+                            blurRadius: 84,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          // Destination
+                          Positioned(
+                            left: 17,
+                            top: 38,
+                            child: Text(
+                              'To  ${_getDestinationCity()}',
+                              style: GoogleFonts.balooBhai2(
+                                fontSize: 29,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.black,
+                                height: 45 / 29,
+                              ),
+                            ),
+                          ),
+                          // Date
+                          Positioned(
+                            left: 17,
+                            bottom: 23,
+                            child: Text(
+                              _formatDate(_departureTime),
+                              style: GoogleFonts.balooBhai2(
+                                fontSize: 23,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black.withValues(alpha: 0.6),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  
+                  // LAYER 4: Standalone back button (only when not scrolled)
+                  if (showStandaloneBackButton)
+                    Positioned(
+                      left: 16,
+                      top: 60,
+                      child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Center(
+                            child: Icon(
+                              CupertinoIcons.chevron_left,
+                              size: 23,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
       ),
     );
   }
 
   Widget _buildDepartureSection(double screenWidth) {
+    // Figma: height 192px
     return Container(
       width: screenWidth,
-      height: 173,
+      height: 192,
       color: _cardWhite,
       child: Stack(
         children: [
-          // "Departure" title
+          // "Departure" title - Figma: left calc(50%-178px), bottom 130px (from bottom)
           Positioned(
             left: 17,
-            top: 17,
+            top: 29,
             child: Text(
               'Departure',
               style: GoogleFonts.balooBhai2(
@@ -1608,18 +1666,17 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
               ),
             ),
           ),
-          // Airport name
+          // Airport name - Figma: left calc(50%-178px), bottom 96px (from bottom)
           Positioned(
             left: 17,
-            top: 50,
+            top: 63,
             child: SizedBox(
-              width: 240,
+              width: 217,
               child: Text(
                 _getDepartureAirportName(),
                 style: GoogleFonts.balooBhai2(
                   fontSize: 17,
-                  fontWeight: FontWeight.w400,
-                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.w500,
                   color: Colors.black,
                   height: 23 / 17,
                 ),
@@ -1628,62 +1685,57 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
               ),
             ),
           ),
-          // Time box with green border
+          // Time box with green border - Figma: right 13px, top 17px
           Positioned(
             right: 13,
             top: 17,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7),
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(13),
                 border: Border.all(color: _accentGreen, width: 4),
               ),
-              child: Column(
-                children: [
-                  Text(
-                    _formatTime(_departureTime),
-                    style: GoogleFonts.balooBhai2(
-                      fontSize: 31,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black,
-                      letterSpacing: 2.17,
-                      height: 45 / 31,
-                    ),
-                  ),
-                  if (_isOnTime)
-                    Container(
-                      width: 80,
-                      height: 27,
-                      decoration: BoxDecoration(
-                        color: _accentGreen,
-                        borderRadius: const BorderRadius.only(
-                          bottomLeft: Radius.circular(9),
-                          bottomRight: Radius.circular(9),
-                        ),
-                      ),
-                      child: Center(
-                        child: Text(
-                          'On Time',
-                          style: GoogleFonts.balooBhai2(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w400,
-                            color: _cardWhite,
-                            letterSpacing: 1.19,
-                            height: 23 / 17,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
+              child: Text(
+                _formatTime(_departureTime),
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 31,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black,
+                  letterSpacing: 2.17,
+                  height: 43 / 31,
+                ),
               ),
             ),
           ),
-          // Terminal badge (if available)
+          // "On Time" label - Figma: right calc(50%-44px) = 63px, bottom 59px
+          // Positioned separately below the time box with green background
+          if (_isOnTime)
+            Positioned(
+              right: 63,
+              bottom: 59,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: _accentGreen,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'On Time',
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: _cardWhite,
+                    height: 23 / 17,
+                  ),
+                ),
+              ),
+            ),
+          // Terminal badge - Figma: left 17px, top 136px
           if (_departureTerminal != null)
             Positioned(
               left: 17,
-              bottom: 13,
+              bottom: 23,
               child: Container(
                 width: 48,
                 height: 33,
@@ -1697,24 +1749,24 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                     'T${_departureTerminal!}',
                     style: GoogleFonts.balooBhai2(
                       fontSize: 23,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w600,
                       color: Colors.black,
-                      height: 33 / 23,
+                      height: 31 / 23,
                     ),
                   ),
                 ),
               ),
             ),
-          // Gate badge (if available)
+          // Gate badge - Figma: left 71px, bg #F14D00 (orange)
           if (_departureGate != null)
             Positioned(
               left: _departureTerminal != null ? 71 : 17,
-              bottom: 13,
+              bottom: 23,
               child: Container(
                 height: 33,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.only(left: 8, right: 12),
                 decoration: BoxDecoration(
-                  color: _gateGold,
+                  color: _gateOrange,
                   borderRadius: BorderRadius.circular(100),
                 ),
                 child: Row(
@@ -1723,16 +1775,16 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                     const Icon(
                       CupertinoIcons.arrow_turn_up_right,
                       size: 19,
-                      color: _gateTextGold,
+                      color: Color(0xFFFFDDDC),
                     ),
                     const SizedBox(width: 4),
                     Text(
                       'Gate $_departureGate',
                       style: GoogleFonts.balooBhai2(
                         fontSize: 23,
-                        fontWeight: FontWeight.w700,
-                        color: _gateTextGold,
-                        height: 33 / 23,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFFFFDDDC),
+                        height: 31 / 23,
                       ),
                     ),
                   ],
@@ -1744,73 +1796,22 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
     );
   }
 
-  Widget _buildStopSection(double screenWidth) {
-    // Figma: icon at calc(50%-164.5px), title at calc(50%-138px)
-    // For 390px width: icon at ~30px, title at ~57px
-    return Container(
-      width: screenWidth,
-      height: 112,
-      color: _backgroundLight,
-      child: Stack(
-        children: [
-          // Stop icon - Figma: left calc(50%-164.5px)
-          Positioned(
-            left: 30,
-            top: 33,
-            child: Icon(
-              CupertinoIcons.clock,
-              size: 23,
-              color: Colors.black,
-            ),
-          ),
-          // Stop title - Figma: left calc(50%-138px), top 17px
-          Positioned(
-            left: 57,
-            top: 17,
-            child: Text(
-              '${widget.flight.stops} stop${widget.flight.stops > 1 ? 's' : ''}',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 25,
-                fontWeight: FontWeight.w600,
-                color: Colors.black,
-                height: 33 / 25,
-              ),
-            ),
-          ),
-          // Stop location - Figma: left calc(50%-138px), top 53px
-          Positioned(
-            left: 57,
-            top: 53,
-            child: SizedBox(
-              width: 240,
-              child: Text(
-                'Connecting flight',
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w400,
-                  fontStyle: FontStyle.italic,
-                  color: Colors.black,
-                  height: 21 / 15,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildArrivalSection(double screenWidth) {
+    // Figma: height 176px
+    // Calculate gate badge position based on terminal presence
+    double gateBadgeLeft = 17;
+    if (_arrivalTerminal != null) gateBadgeLeft = 71;
+    
     return Container(
       width: screenWidth,
-      height: 160,
+      height: 176,
       color: _cardWhite,
       child: Stack(
         children: [
-          // "Arrival" title
+          // "Arrival" title - Figma: left calc(50%-178px), bottom 153px
           Positioned(
             left: 17,
-            top: 15,
+            top: 13,
             child: Text(
               'Arrival',
               style: GoogleFonts.balooBhai2(
@@ -1821,18 +1822,17 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
               ),
             ),
           ),
-          // Airport name
+          // Airport name - Figma: left calc(50%-178px), bottom 119px, width 217px
           Positioned(
             left: 17,
-            top: 49,
+            top: 47,
             child: SizedBox(
-              width: 240,
+              width: 217,
               child: Text(
                 _getArrivalAirportName(),
                 style: GoogleFonts.balooBhai2(
                   fontSize: 17,
-                  fontWeight: FontWeight.w400,
-                  fontStyle: FontStyle.italic,
+                  fontWeight: FontWeight.w500,
                   color: Colors.black,
                   height: 23 / 17,
                 ),
@@ -1841,36 +1841,33 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
               ),
             ),
           ),
-          // Time box (gray background for arrival)
+          // Time box (gray background) - Figma: right 13px, bottom 107px
           Positioned(
             right: 13,
-            top: 15,
+            top: 17,
             child: Container(
-              width: 111,
-              height: 45,
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: BoxDecoration(
                 color: _arrivalTimeBg,
                 borderRadius: BorderRadius.circular(13),
               ),
-              child: Center(
-                child: Text(
-                  _formatTime(_arrivalTime),
-                  style: GoogleFonts.balooBhai2(
-                    fontSize: 31,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.black,
-                    letterSpacing: 2.17,
-                    height: 45 / 31,
-                  ),
+              child: Text(
+                _formatTime(_arrivalTime),
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 31,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black,
+                  letterSpacing: 2.17,
+                  height: 43 / 31,
                 ),
               ),
             ),
           ),
-          // Terminal badge (if available)
+          // Terminal badge - Figma: left 17px, top 120px
           if (_arrivalTerminal != null)
             Positioned(
               left: 17,
-              bottom: 15,
+              bottom: 23,
               child: Container(
                 width: 48,
                 height: 33,
@@ -1884,22 +1881,56 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                     'T${_arrivalTerminal!}',
                     style: GoogleFonts.balooBhai2(
                       fontSize: 23,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w600,
                       color: Colors.black,
-                      height: 33 / 23,
+                      height: 31 / 23,
                     ),
                   ),
                 ),
               ),
             ),
-          // Baggage belt badge (if available)
-          if (_arrivalBaggage != null)
+          // Gate badge - Figma: left 71px, bg #F14D00 (orange)
+          if (_arrivalGate != null)
             Positioned(
-              left: _arrivalTerminal != null ? 74 : 17,
-              bottom: 15,
+              left: gateBadgeLeft,
+              bottom: 23,
               child: Container(
                 height: 33,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.only(left: 8, right: 12),
+                decoration: BoxDecoration(
+                  color: _gateOrange,
+                  borderRadius: BorderRadius.circular(100),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      CupertinoIcons.arrow_turn_up_right,
+                      size: 19,
+                      color: Color(0xFFFFDDDC),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Gate $_arrivalGate',
+                      style: GoogleFonts.balooBhai2(
+                        fontSize: 23,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFFFFDDDC),
+                        height: 31 / 23,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          // Belt badge - Figma: left 203px, bg #202269 (navy)
+          if (_arrivalBaggage != null)
+            Positioned(
+              left: 203,
+              bottom: 23,
+              child: Container(
+                height: 33,
+                padding: const EdgeInsets.only(left: 8, right: 12),
                 decoration: BoxDecoration(
                   color: _beltNavy,
                   borderRadius: BorderRadius.circular(100),
@@ -1917,9 +1948,9 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                       'Belt $_arrivalBaggage',
                       style: GoogleFonts.balooBhai2(
                         fontSize: 23,
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w600,
                         color: Colors.white,
-                        height: 33 / 23,
+                        height: 31 / 23,
                       ),
                     ),
                   ],
@@ -1933,62 +1964,57 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
 
   Widget _buildAircraftSection(double screenWidth) {
     // Parse aircraft name (e.g., "Boeing 787-9 Dreamliner")
-    String? manufacturer;
-    String? variant;
+    // Figma shows: "Boeing 787" as title, "Dreamliner" as subtitle
+    String displayName = 'Boeing 787';
+    String? subtitle = 'Dreamliner';
     
     if (_aircraftName != null) {
+      // Try to parse the aircraft name
       final parts = _aircraftName!.split(' ');
-      if (parts.isNotEmpty) manufacturer = parts[0];
-      if (parts.length > 1) variant = parts.sublist(1).join(' ');
+      if (parts.length >= 2) {
+        // e.g., "Boeing 787-9 Dreamliner" -> "Boeing 787" + "Dreamliner"
+        displayName = '${parts[0]} ${parts[1]}';
+        if (parts.length > 2) {
+          subtitle = parts.sublist(2).join(' ');
+        }
+      } else {
+        displayName = _aircraftName!;
+        subtitle = null;
+      }
     }
     
+    // Figma: height 93px, bg #FDFFFA (off-white)
     return Container(
       width: screenWidth,
       height: 93,
-      color: _aircraftBg,
+      color: _aircraftBg, // Now #FDFFFA
       child: Stack(
         children: [
-          // Manufacturer name (e.g., "Boeing")
+          // Aircraft name - Figma: left 16px, top 17px
           Positioned(
             left: 16,
             top: 17,
             child: Text(
-              manufacturer ?? _aircraftCode ?? '',
+              displayName,
               style: GoogleFonts.balooBhai2(
                 fontSize: 25,
                 fontWeight: FontWeight.w700,
-                color: _aircraftText,
+                color: Colors.black,
                 height: 33 / 25,
               ),
             ),
           ),
-          // Model code (e.g., "787")
-          Positioned(
-            right: 19,
-            top: 17,
-            child: Text(
-              _aircraftCode ?? '',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 23,
-                fontWeight: FontWeight.w500,
-                color: _aircraftText,
-                letterSpacing: 4.6,
-                height: 45 / 23,
-              ),
-            ),
-          ),
-          // Variant name (e.g., "Dreamliner")
-          if (variant != null)
+          // Subtitle (e.g., "Dreamliner") - Figma: left calc(50%-179px), top 53px
+          if (subtitle != null)
             Positioned(
               left: 16,
               top: 53,
               child: Text(
-                variant,
+                subtitle,
                 style: GoogleFonts.balooBhai2(
                   fontSize: 17,
-                  fontWeight: FontWeight.w400,
-                  fontStyle: FontStyle.italic,
-                  color: const Color(0xFFFDFFFA).withValues(alpha: 0.6),
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
                   height: 23 / 17,
                 ),
               ),
