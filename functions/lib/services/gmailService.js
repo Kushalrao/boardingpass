@@ -99,6 +99,44 @@ class GmailService {
         });
         return Buffer.from(attachment.data.data || '', 'base64');
     }
+    /**
+     * Fetch a single message by ID
+     */
+    async fetchMessageById(messageId) {
+        try {
+            const email = await this.gmail.users.messages.get({
+                userId: 'me',
+                id: messageId,
+                format: 'full',
+            });
+            const headers = email.data.payload?.headers || [];
+            const subjectHeader = headers.find((h) => h.name?.toLowerCase() === 'subject');
+            const fromHeader = headers.find((h) => h.name?.toLowerCase() === 'from');
+            const dateHeader = headers.find((h) => h.name?.toLowerCase() === 'date');
+            // Extract body content
+            let bodyContent = '';
+            const bodyData = email.data.payload?.parts?.[0]?.body?.data ||
+                email.data.payload?.body?.data;
+            if (bodyData) {
+                bodyContent = Buffer.from(bodyData, 'base64').toString('utf-8');
+            }
+            // Find PDF attachments
+            const pdfAttachments = [];
+            this.findPdfParts(email.data.payload, pdfAttachments);
+            return {
+                id: messageId,
+                subject: subjectHeader?.value || '',
+                from: fromHeader?.value || '',
+                date: dateHeader?.value || '',
+                body: bodyContent,
+                pdfAttachments,
+            };
+        }
+        catch (error) {
+            console.error(`Error fetching message ${messageId}:`, error);
+            return null;
+        }
+    }
     findPdfParts(payload, pdfAttachments) {
         if (!payload)
             return;

@@ -53,6 +53,10 @@ dependencies:
   # Google Sign-In
   google_sign_in: ^6.2.1
 
+  # Push Notifications
+  firebase_messaging: ^15.1.6
+  flutter_local_notifications: ^18.0.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:google_maps_flutter_android/google_maps_flutter_android.dart';
 import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platform_interface.dart';
 import 'services/auth_service.dart';
 import 'services/cirium_api_service.dart';
+import 'services/notification_service.dart';
 import 'models/schedule.dart';
 import 'models/flight_status.dart';
 import 'models/common.dart';
@@ -26,6 +29,10 @@ void main() async {
   debugPrint('[Airtime] Initializing Firebase...');
   await Firebase.initializeApp();
   debugPrint('[Airtime] Firebase initialized successfully');
+
+  // Register FCM background message handler
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  debugPrint('[Airtime] FCM background handler registered');
 
   runApp(const MyApp());
 }
@@ -76,13 +83,15 @@ class _HomePageState extends State<HomePage> {
   int? _selectedResultIndex;
 
   // Added flights state
-  List<({ScheduledFlight flight, Appendix? appendix})> _addedFlights = [];
+  List<({ScheduledFlight flight, Appendix? appendix, String? firestoreId})> _addedFlights = [];
+  bool _isLoadingFlights = false;
 
   // Cape Town / Brackenfell area - default location from Figma
   static const LatLng _defaultLocation = LatLng(-33.8688, 18.7029);
 
   // Green accent color used throughout
   static const Color _accentGreen = Color(0xFF34C759);
+  static const Color _delayedYellow = Color(0xFFD9C700); // Yellow-green for delayed state
 
   @override
   void initState() {
@@ -103,8 +112,110 @@ class _HomePageState extends State<HomePage> {
 
     if (_authService.isSignedIn) {
       debugPrint('[Airtime] User already signed in: ${_authService.currentUser?.email}');
+    } else if (_authService.isAnonymous) {
+      debugPrint('[Airtime] Anonymous user: ${_authService.userId}');
     } else {
       debugPrint('[Airtime] No user signed in');
+    }
+
+    // Initialize notifications if user is authenticated
+    if (_authService.hasAuth && _authService.userId != null) {
+      debugPrint('[Airtime] Initializing notifications...');
+      await NotificationService().init(_authService.userId!);
+    }
+
+    // Load flights from Firestore
+    await _loadFlightsFromFirestore();
+  }
+
+  Future<void> _loadFlightsFromFirestore() async {
+    if (!_authService.hasAuth) return;
+
+    setState(() => _isLoadingFlights = true);
+
+    try {
+      final flightsData = await _authService.loadFlights();
+      final loadedFlights = <({ScheduledFlight flight, Appendix? appendix, String? firestoreId})>[];
+
+      for (final data in flightsData) {
+        // Reconstruct ScheduledFlight from stored data
+        final flight = ScheduledFlight(
+          carrierFsCode: data['carrierFsCode'] ?? '',
+          flightNumber: data['flightNumber'] ?? '',
+          departureAirportFsCode: data['originAirport'] ?? '',
+          arrivalAirportFsCode: data['destinationAirport'] ?? '',
+          departureTime: data['departureTime'] ?? '',
+          arrivalTime: data['arrivalTime'] ?? '',
+          stops: data['stops'] ?? 0,
+          departureTerminal: data['departureTerminal'],
+          arrivalTerminal: data['arrivalTerminal'],
+          flightEquipmentIataCode: data['flightEquipmentIataCode'],
+          isCodeshare: data['isCodeshare'] ?? false,
+          isWetlease: data['isWetlease'] ?? false,
+          serviceType: data['serviceType'],
+          serviceClasses: List<String>.from(data['serviceClasses'] ?? []),
+          trafficRestrictions: List<String>.from(data['trafficRestrictions'] ?? []),
+          codeshares: [],
+          referenceCode: data['referenceCode'],
+        );
+
+        // Reconstruct minimal Appendix for display (airline and airport info)
+        Appendix? appendix;
+        if (data['airlineName'] != null || data['originCity'] != null || data['destinationCity'] != null) {
+          appendix = Appendix(
+            airlines: data['airlineName'] != null
+                ? [Airline(
+                    fs: data['carrierFsCode'] ?? '',
+                    name: data['airlineName'],
+                    active: true,
+                  )]
+                : [],
+            airports: [
+              if (data['originCity'] != null)
+                Airport(
+                  fs: data['originAirport'] ?? '',
+                  name: data['originAirportName'] ?? data['originAirport'] ?? '',
+                  city: data['originCity'] ?? '',
+                  countryCode: '',
+                  countryName: '',
+                  regionName: '',
+                  timeZoneRegionName: '',
+                  utcOffsetHours: 0,
+                  latitude: 0,
+                  longitude: 0,
+                  active: true,
+                ),
+              if (data['destinationCity'] != null)
+                Airport(
+                  fs: data['destinationAirport'] ?? '',
+                  name: data['destinationAirportName'] ?? data['destinationAirport'] ?? '',
+                  city: data['destinationCity'] ?? '',
+                  countryCode: '',
+                  countryName: '',
+                  regionName: '',
+                  timeZoneRegionName: '',
+                  utcOffsetHours: 0,
+                  latitude: 0,
+                  longitude: 0,
+                  active: true,
+                ),
+            ],
+            equipments: [],
+          );
+        }
+
+        loadedFlights.add((flight: flight, appendix: appendix, firestoreId: data['id'] as String?));
+      }
+
+      setState(() {
+        _addedFlights = loadedFlights;
+        _isLoadingFlights = false;
+      });
+
+      debugPrint('[Airtime] Loaded ${loadedFlights.length} flights');
+    } catch (e) {
+      debugPrint('[Airtime] Error loading flights: $e');
+      setState(() => _isLoadingFlights = false);
     }
   }
 
@@ -119,6 +230,14 @@ class _HomePageState extends State<HomePage> {
         debugPrint('[Airtime] Sign in successful!');
         debugPrint('[Airtime] User ID: ${user.uid}');
         debugPrint('[Airtime] Email: ${user.email}');
+
+        // Initialize notifications for the signed-in user
+        debugPrint('[Airtime] Initializing notifications...');
+        await NotificationService().init(user.uid);
+
+        // Reload flights (may have been migrated from anonymous account)
+        await _loadFlightsFromFirestore();
+
         setState(() {});
       } else {
         debugPrint('[Airtime] Sign in returned null (user cancelled or error)');
@@ -240,15 +359,51 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _handleAcceptFlight() {
+  Future<void> _handleAcceptFlight() async {
     if (_selectedResultIndex == null || _searchResults.isEmpty) return;
-    
+
     final selectedFlight = _searchResults[_selectedResultIndex!];
+    final appendix = _appendix;
     debugPrint('[Airtime] User accepted flight: ${selectedFlight.fullFlightNumber}');
-    
-    // Add the flight to added flights list
+
+    // Get airline and airport info for storage
+    final airlineName = appendix?.getAirline(selectedFlight.carrierFsCode)?.name;
+    final originAirport = appendix?.getAirport(selectedFlight.departureAirportFsCode);
+    final destinationAirport = appendix?.getAirport(selectedFlight.arrivalAirportFsCode);
+
+    // Save to Firestore
+    final flightData = {
+      'carrierFsCode': selectedFlight.carrierFsCode,
+      'flightNumber': selectedFlight.flightNumber,
+      'fullFlightNumber': selectedFlight.fullFlightNumber,
+      'originAirport': selectedFlight.departureAirportFsCode,
+      'destinationAirport': selectedFlight.arrivalAirportFsCode,
+      'departureTime': selectedFlight.departureTime,
+      'arrivalTime': selectedFlight.arrivalTime,
+      'departureDate': selectedFlight.departureDateTime?.toIso8601String().split('T')[0],
+      'stops': selectedFlight.stops,
+      'departureTerminal': selectedFlight.departureTerminal,
+      'arrivalTerminal': selectedFlight.arrivalTerminal,
+      'flightEquipmentIataCode': selectedFlight.flightEquipmentIataCode,
+      'isCodeshare': selectedFlight.isCodeshare,
+      'isWetlease': selectedFlight.isWetlease,
+      'serviceType': selectedFlight.serviceType,
+      'serviceClasses': selectedFlight.serviceClasses,
+      'trafficRestrictions': selectedFlight.trafficRestrictions,
+      'referenceCode': selectedFlight.referenceCode,
+      // Store display info
+      'airlineName': airlineName,
+      'originCity': originAirport?.city,
+      'originAirportName': originAirport?.name,
+      'destinationCity': destinationAirport?.city,
+      'destinationAirportName': destinationAirport?.name,
+    };
+
+    await _authService.saveFlight(flightData);
+
+    // Add the flight to local list for immediate display
     setState(() {
-      _addedFlights.add((flight: selectedFlight, appendix: _appendix));
+      _addedFlights.add((flight: selectedFlight, appendix: appendix, firestoreId: null));
       _isAddingFlight = false;
       _hasSearched = false;
       _searchResults = [];
@@ -400,29 +555,30 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
-              // Added flights container (white area at bottom)
-              Positioned(
-                top: mapHeight,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: Container(
-                  color: Colors.white,
-                  child: _addedFlights.isEmpty
-                    ? Center(
-                        child: Text(
-                          'No flights added yet',
-                          style: GoogleFonts.balooBhai2(
-                            fontSize: 27,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black.withValues(alpha: 0.4),
-                            height: 33 / 27,
+              // Added flights container (white area at bottom) - hidden when adding flight
+              if (!_isAddingFlight)
+                Positioned(
+                  top: mapHeight,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    color: Colors.white,
+                    child: _addedFlights.isEmpty
+                      ? Center(
+                          child: Text(
+                            'No flights added yet',
+                            style: GoogleFonts.balooBhai2(
+                              fontSize: 27,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black.withValues(alpha: 0.4),
+                              height: 33 / 27,
+                            ),
                           ),
-                        ),
-                      )
-                    : _buildAddedFlightsList(),
+                        )
+                      : _buildAddedFlightsList(),
+                  ),
                 ),
-              ),
 
               // Calendar component (shown when date field is active and no search yet)
               if (_isAddingFlight && _activeField == 'date' && !_hasSearched)
@@ -600,7 +756,10 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildAddFlightCard(double cardWidth) {
     return GestureDetector(
-      onTap: _handleAddFlightTap,
+      onTap: () {
+        HapticFeedback.mediumImpact();
+        _handleAddFlightTap();
+      },
       child: Container(
         width: cardWidth,
         padding: const EdgeInsets.only(
@@ -748,7 +907,10 @@ class _HomePageState extends State<HomePage> {
     final String displayText = isFilled ? value : placeholder;
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: () {
+        HapticFeedback.lightImpact();
+        onTap();
+      },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 5),
         decoration: BoxDecoration(
@@ -907,6 +1069,28 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // Check if flight is delayed (for added flights list)
+  Future<bool> _isFlightDelayed(ScheduledFlight flight) async {
+    try {
+      final departureDate = flight.departureDateTime;
+      if (departureDate == null) return false;
+      
+      final response = await _ciriumService.getFlightStatusByFlightNumber(
+        flight: flight.fullFlightNumber,
+        year: departureDate.year,
+        month: departureDate.month,
+        day: departureDate.day,
+      );
+      
+      if (response.hasError || response.flightStatuses.isEmpty) return false;
+      
+      final flightStatus = response.flightStatuses.first;
+      return flightStatus.delays?.hasDepartureDelay ?? false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   Widget _buildAddedFlightsList() {
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -920,77 +1104,86 @@ class _HomePageState extends State<HomePage> {
         final destinationCity = appendix?.getAirport(flight.arrivalAirportFsCode)?.city ?? flight.arrivalAirportFsCode;
         final departureTime = flight.departureDateTime;
         
-        return GestureDetector(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => FlightTrackingPage(
-                  flight: flight,
-                  appendix: appendix,
+        return FutureBuilder<bool>(
+          future: _isFlightDelayed(flight),
+          builder: (context, snapshot) {
+            final isDelayed = snapshot.data ?? false;
+            final borderColor = isDelayed ? _delayedYellow : _accentGreen;
+            
+            return GestureDetector(
+              onTap: () {
+                HapticFeedback.mediumImpact();
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => FlightTrackingPage(
+                      flight: flight,
+                      appendix: appendix,
+                    ),
+                  ),
+                );
+              },
+              child: Container(
+                width: 390,
+                height: 98,
+                color: Colors.white,
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: 17,
+                      top: 19,
+                      child: Text(
+                        airlineName,
+                        style: GoogleFonts.balooBhai2(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black,
+                          height: 23 / 17,
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      left: 17,
+                      top: 46,
+                      child: Text(
+                        'To $destinationCity',
+                        style: GoogleFonts.balooBhai2(
+                          fontSize: 27,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black,
+                          height: 33 / 27,
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      right: 19,
+                      bottom: 29,
+                      child: Container(
+                        padding: const EdgeInsets.only(left: 7, right: 7, top: 7, bottom: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(11),
+                          border: Border.all(
+                            color: borderColor,
+                            width: 3,
+                          ),
+                        ),
+                        child: Text(
+                          _formatTime(departureTime),
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: 31,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black,
+                            height: 35 / 31,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             );
           },
-          child: Container(
-            width: 390,
-            height: 98,
-            color: Colors.white,
-            child: Stack(
-              children: [
-                Positioned(
-                  left: 17,
-                  top: 19,
-                  child: Text(
-                    airlineName,
-                    style: GoogleFonts.balooBhai2(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black,
-                      height: 23 / 17,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 17,
-                  top: 46,
-                  child: Text(
-                    'To $destinationCity',
-                    style: GoogleFonts.balooBhai2(
-                      fontSize: 27,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.black,
-                      height: 33 / 27,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 19,
-                  bottom: 29,
-                  child: Container(
-                    padding: const EdgeInsets.only(left: 7, right: 7, top: 7, bottom: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: _accentGreen,
-                        width: 3,
-                      ),
-                    ),
-                    child: Text(
-                      _formatTime(departureTime),
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 31,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.black,
-                        height: 35 / 31,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
         );
       },
     );
@@ -1015,7 +1208,10 @@ class _HomePageState extends State<HomePage> {
             top: 0,
             bottom: 0,
             child: GestureDetector(
-              onTap: _handleRejectFlight,
+              onTap: () {
+                HapticFeedback.lightImpact();
+                _handleRejectFlight();
+              },
               child: Center(
                 child: Icon(
                   CupertinoIcons.xmark,
@@ -1031,7 +1227,10 @@ class _HomePageState extends State<HomePage> {
             top: 0,
             bottom: 0,
             child: GestureDetector(
-              onTap: _handleAcceptFlight,
+              onTap: () {
+                HapticFeedback.mediumImpact();
+                _handleAcceptFlight();
+              },
               child: Center(
                 child: Icon(
                   CupertinoIcons.checkmark,
@@ -1180,6 +1379,7 @@ class _HomePageState extends State<HomePage> {
 
                 return GestureDetector(
                   onTap: () {
+                    HapticFeedback.selectionClick();
                     _handleDateSelected(date);
                   },
                   child: Container(
@@ -1235,7 +1435,7 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   GoogleMapController? _mapController;
   final ScrollController _scrollController = ScrollController();
   
-  bool _isLoading = true;
+  bool _isLoading = false;  // Start with false to show page instantly with existing data
   FlightStatus? _flightStatus;
   Appendix? _statusAppendix;
   double _scrollOffset = 0;
@@ -1251,6 +1451,7 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   static const Color _beltNavy = Color(0xFF202269);
   static const Color _arrivalTimeBg = Color(0xFFE7EBD9);
   static const Color _aircraftBg = Color(0xFFFDFFFA); // Same as cardWhite
+  static const Color _delayedYellow = Color(0xFFD9C700); // Yellow-green for delayed state
 
   @override
   void initState() {
@@ -1266,9 +1467,8 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   }
 
   Future<void> _fetchFlightStatus() async {
-    setState(() {
-      _isLoading = true;
-    });
+    // Don't set loading state - page shows instantly with existing data
+    // API updates will refresh components in place
 
     try {
       final departureDate = widget.flight.departureDateTime;
@@ -1308,8 +1508,16 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
         });
       } else {
         debugPrint('[Airtime] Flight status found');
+        final status = response.flightStatuses.first;
+        debugPrint('[Airtime] Flight status details:');
+        debugPrint('  - operationalTimes: ${status.operationalTimes}');
+        debugPrint('  - scheduledGateDeparture: ${status.operationalTimes?.scheduledGateDeparture?.localDateTime}');
+        debugPrint('  - publishedDeparture: ${status.operationalTimes?.publishedDeparture?.localDateTime}');
+        debugPrint('  - departureDate: ${status.departureDate?.localDateTime}');
+        debugPrint('  - Schedule departureDateTime: ${widget.flight.departureDateTime}');
+        
         setState(() {
-          _flightStatus = response.flightStatuses.first;
+          _flightStatus = status;
           _statusAppendix = response.appendix ?? widget.appendix;
           _isLoading = false;
         });
@@ -1364,10 +1572,19 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
   // Get departure time - prefer real-time status, fallback to schedule
   DateTime? get _departureTime {
     if (_flightStatus != null) {
-      return _flightStatus!.operationalTimes?.scheduledGateDeparture?.localDateTime ??
-             _flightStatus!.operationalTimes?.publishedDeparture?.localDateTime ??
-             _flightStatus!.departureDate?.localDateTime;
+      // Try to get time from flight status operational times
+      final scheduledGate = _flightStatus!.operationalTimes?.scheduledGateDeparture?.localDateTime;
+      final published = _flightStatus!.operationalTimes?.publishedDeparture?.localDateTime;
+
+      // If we have operational times with actual time, use them
+      if (scheduledGate != null) return scheduledGate;
+      if (published != null) return published;
+
+      // Don't use departureDate as it typically only contains the date, not time
+      // Fall through to use schedule data instead
     }
+
+    // Use schedule departure time (always has the actual time)
     return widget.flight.departureDateTime;
   }
 
@@ -1463,40 +1680,45 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
     return Scaffold(
       body: Container(
         color: _backgroundLight,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator(color: _accentGreen))
-            : Stack(
+        child: Stack(
                 children: [
                   // LAYER 1: Scrollable content
                   SingleChildScrollView(
                     controller: _scrollController,
                     child: Column(
-                      children: [
-                        // Map at top
-                        SizedBox(
+                    children: [
+                      // Map at top
+              SizedBox(
                           height: mapHeight,
-                          width: screenWidth,
-                          child: GoogleMap(
-                            initialCameraPosition: CameraPosition(
-                              target: _getDestinationLatLng(),
-                              zoom: 10.0,
-                            ),
-                            onMapCreated: (controller) {
-                              _mapController = controller;
-                            },
-                            cloudMapId: '62f0e28a3bd3ee4c493ea929',
-                            zoomControlsEnabled: false,
-                            myLocationButtonEnabled: false,
-                            compassEnabled: false,
-                            mapToolbarEnabled: false,
+                        width: screenWidth,
+                        child: GoogleMap(
+                          initialCameraPosition: CameraPosition(
+                            target: _getDestinationLatLng(),
+                            zoom: 10.0,
                           ),
+                          onMapCreated: (controller) {
+                            _mapController = controller;
+                          },
+                          cloudMapId: '62f0e28a3bd3ee4c493ea929',
+                          zoomControlsEnabled: false,
+                          myLocationButtonEnabled: false,
+                          compassEnabled: false,
+                          mapToolbarEnabled: false,
                         ),
-                        
+                      ),
+                      
                         // Departure info section (starts right after map)
                         _buildDepartureSection(screenWidth),
                         
+                        // 17px spacing between containers
+                        const SizedBox(height: 17),
+                        
                         // Arrival info section
                         _buildArrivalSection(screenWidth),
+                        
+                        // 17px spacing between containers
+                        if (_aircraftName != null || _aircraftCode != null)
+                          const SizedBox(height: 17),
                         
                         // Aircraft info section
                         if (_aircraftName != null || _aircraftCode != null)
@@ -1508,60 +1730,7 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                     ),
                   ),
                   
-                  // LAYER 2: Floating flight badge (always on top)
-                  Positioned(
-                    left: showIntegratedBackButton ? 24 : 24,
-                    top: badgeTop,
-                    child: GestureDetector(
-                      onTap: showIntegratedBackButton ? () => Navigator.pop(context) : null,
-                      child: Container(
-                        padding: EdgeInsets.only(
-                          left: showIntegratedBackButton ? 13 : 13,
-                          right: 13,
-                          top: 7,
-                          bottom: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _flightBadgeBlue,
-                          borderRadius: BorderRadius.circular(17),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Integrated back button when scrolled
-                            if (showIntegratedBackButton) ...[
-                              Container(
-                                width: 40,
-                                height: 40,
-                                decoration: const BoxDecoration(
-                                  color: Colors.white,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Center(
-                                  child: Icon(
-                                    CupertinoIcons.chevron_left,
-                                    size: 20,
-                                    color: Colors.black,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                            Text(
-                              widget.flight.fullFlightNumber,
-                              style: GoogleFonts.balooBhai2(
-                                fontSize: 37,
-                                fontWeight: FontWeight.w800,
-                                color: _flightBadgeTextBlue,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  
-                  // LAYER 3: Floating journey info card (always on top)
+                  // LAYER 2: Floating journey info card (behind flight badge)
                   Positioned(
                     left: 7,
                     top: cardTop,
@@ -1614,9 +1783,62 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                     ),
                   ),
                   
+                  // LAYER 3: Floating flight badge (always on top - highest z-index)
+                  Positioned(
+                    left: showIntegratedBackButton ? 24 : 24,
+                    top: badgeTop,
+                    child: GestureDetector(
+                      onTap: showIntegratedBackButton ? () => Navigator.pop(context) : null,
+                      child: Container(
+                        padding: EdgeInsets.only(
+                          left: showIntegratedBackButton ? 13 : 13,
+                          right: 13,
+                          top: 7,
+                          bottom: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _flightBadgeBlue,
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Integrated back button when scrolled
+                            if (showIntegratedBackButton) ...[
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: const BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Center(
+                                  child: Icon(
+                                    CupertinoIcons.chevron_left,
+                                    size: 20,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            Text(
+                              widget.flight.fullFlightNumber,
+                              style: GoogleFonts.balooBhai2(
+                                fontSize: 37,
+                                fontWeight: FontWeight.w800,
+                                color: _flightBadgeTextBlue,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                      
                   // LAYER 4: Standalone back button (only when not scrolled)
                   if (showStandaloneBackButton)
-                    Positioned(
+                      Positioned(
                       left: 16,
                       top: 60,
                       child: GestureDetector(
@@ -1634,12 +1856,12 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                               size: 23,
                               color: Colors.black,
                             ),
-                          ),
                         ),
-                      ),
-                    ),
+                        ),
+                  ),
+          ),
                 ],
-              ),
+        ),
       ),
     );
   }
@@ -1685,52 +1907,66 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
               ),
             ),
           ),
-          // Time box with green border - Figma: right 13px, top 17px
+          // Time box with green/yellow border - Figma: right 13px, top 17px
+          // Contains both time and status label ("On Time" or "delayed") together
           Positioned(
             right: 13,
             top: 17,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(13),
-                border: Border.all(color: _accentGreen, width: 4),
-              ),
-              child: Text(
-                _formatTime(_departureTime),
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 31,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black,
-                  letterSpacing: 2.17,
-                  height: 43 / 31,
+            child: IntrinsicWidth(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(13),
+                  border: Border.all(
+                    color: _isOnTime ? _accentGreen : _delayedYellow,
+                    width: 4,
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Time text
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      child: Text(
+                        _formatTime(_departureTime),
+                        style: GoogleFonts.balooBhai2(
+                          fontSize: 31,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black,
+                          letterSpacing: 2.17,
+                          height: 43 / 31,
+                        ),
+                      ),
+                    ),
+                    // Status badge ("On Time" or "delayed") inside the same container
+                    Container(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _isOnTime ? _accentGreen : _delayedYellow,
+                        borderRadius: const BorderRadius.only(
+                          bottomLeft: Radius.circular(9),
+                          bottomRight: Radius.circular(9),
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          _isOnTime ? 'On Time' : 'delayed',
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                            color: _cardWhite,
+                            height: 23 / 17,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
-          // "On Time" label - Figma: right calc(50%-44px) = 63px, bottom 59px
-          // Positioned separately below the time box with green background
-          if (_isOnTime)
-            Positioned(
-              right: 63,
-              bottom: 59,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _accentGreen,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'On Time',
-                  style: GoogleFonts.balooBhai2(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w600,
-                    color: _cardWhite,
-                    height: 23 / 17,
-                  ),
-                ),
-              ),
-            ),
           // Terminal badge - Figma: left 17px, top 136px
           if (_departureTerminal != null)
             Positioned(
@@ -1788,9 +2024,9 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                       ),
                     ),
                   ],
-                ),
               ),
             ),
+          ),
         ],
       ),
     );
@@ -1851,18 +2087,18 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
                 color: _arrivalTimeBg,
                 borderRadius: BorderRadius.circular(13),
               ),
-              child: Text(
-                _formatTime(_arrivalTime),
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 31,
+                child: Text(
+                  _formatTime(_arrivalTime),
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 31,
                   fontWeight: FontWeight.w700,
-                  color: Colors.black,
-                  letterSpacing: 2.17,
+                    color: Colors.black,
+                    letterSpacing: 2.17,
                   height: 43 / 31,
+                  ),
                 ),
               ),
             ),
-          ),
           // Terminal badge - Figma: left 17px, top 120px
           if (_arrivalTerminal != null)
             Positioned(
@@ -1976,7 +2212,7 @@ class _FlightTrackingPageState extends State<FlightTrackingPage> {
         displayName = '${parts[0]} ${parts[1]}';
         if (parts.length > 2) {
           subtitle = parts.sublist(2).join(' ');
-        }
+    }
       } else {
         displayName = _aircraftName!;
         subtitle = null;
