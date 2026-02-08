@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.onFlightDeleted = exports.onFlightCreated = exports.deleteFlightAlert = exports.createFlightAlert = exports.ciriumAlertWebhook = exports.gmailWebhook = exports.setupGmailWatch = exports.storeRefreshToken = exports.analyzeTravel = void 0;
+exports.onTrainCreated = exports.deleteTrainBooking = exports.refreshTrainStatus = exports.getUserTrains = exports.addTrainBooking = exports.searchTrains = exports.getTrainLiveStatus = exports.getTrainSchedule = exports.getTrainPnrStatus = exports.onFlightDeleted = exports.onFlightCreated = exports.deleteFlightAlert = exports.createFlightAlert = exports.ciriumAlertWebhook = exports.gmailWebhook = exports.setupGmailWatch = exports.storeRefreshToken = exports.analyzeTravel = void 0;
 const functions = __importStar(require("firebase-functions"));
 const admin = __importStar(require("firebase-admin"));
 const googleapis_1 = require("googleapis");
@@ -783,4 +783,18 @@ exports.onFlightDeleted = functions.firestore
         console.error('Error auto-deleting Cirium alert:', error);
     }
 });
+// ============================================
+// TRAIN FUNCTIONS
+// ============================================
+// Export all train-related functions from the trains module
+var index_1 = require("./trains/index");
+Object.defineProperty(exports, "getTrainPnrStatus", { enumerable: true, get: function () { return index_1.getTrainPnrStatus; } });
+Object.defineProperty(exports, "getTrainSchedule", { enumerable: true, get: function () { return index_1.getTrainSchedule; } });
+Object.defineProperty(exports, "getTrainLiveStatus", { enumerable: true, get: function () { return index_1.getTrainLiveStatus; } });
+Object.defineProperty(exports, "searchTrains", { enumerable: true, get: function () { return index_1.searchTrains; } });
+Object.defineProperty(exports, "addTrainBooking", { enumerable: true, get: function () { return index_1.addTrainBooking; } });
+Object.defineProperty(exports, "getUserTrains", { enumerable: true, get: function () { return index_1.getUserTrains; } });
+Object.defineProperty(exports, "refreshTrainStatus", { enumerable: true, get: function () { return index_1.refreshTrainStatus; } });
+Object.defineProperty(exports, "deleteTrainBooking", { enumerable: true, get: function () { return index_1.deleteTrainBooking; } });
+Object.defineProperty(exports, "onTrainCreated", { enumerable: true, get: function () { return index_1.onTrainCreated; } });
 //# sourceMappingURL=index.js.map

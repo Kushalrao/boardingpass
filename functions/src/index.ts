@@ -902,3 +902,19 @@ export const onFlightDeleted = functions.firestore
       console.error('Error auto-deleting Cirium alert:', error);
     }
   });
+
+// ============================================
+// TRAIN FUNCTIONS
+// ============================================
+// Export all train-related functions from the trains module
+export {
+  getTrainPnrStatus,
+  getTrainSchedule,
+  getTrainLiveStatus,
+  searchTrains,
+  addTrainBooking,
+  getUserTrains,
+  refreshTrainStatus,
+  deleteTrainBooking,
+  onTrainCreated,
+} from './trains/index';

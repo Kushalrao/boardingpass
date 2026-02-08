@@ -1,0 +1,1044 @@
+================================================================================
+                    AIRTIME - PRODUCT REQUIREMENTS DOCUMENT
+                         Screen States & Edge Cases
+================================================================================
+
+Document Version: 1.0
+Date: January 26, 2026
+Author: Product Manager
+
+================================================================================
+                              PRODUCT OVERVIEW
+================================================================================
+
+Airtime is a flight tracking application that:
+- Automatically discovers flights from user's Gmail inbox
+- Tracks flights in real-time via Cirium integration
+- Provides performance ratings, weather, aircraft details
+- Sends push notifications for status changes
+
+================================================================================
+                              USER TYPES
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           USER TYPE 1: ANONYMOUS USER                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Definition: User who hasn't signed in with Google                           │
+│                                                                              │
+│ Capabilities:                                                                │
+│   ✓ Can manually add flights                                                │
+│   ✓ Can view flight status, weather, equipment details                      │
+│   ✓ Can receive push notifications (if they grant permission)               │
+│   ✗ Cannot auto-discover flights from Gmail                                 │
+│   ✗ Cannot sync across devices                                              │
+│   ✗ Data is local/device-bound (Firebase Anonymous Auth)                    │
+│                                                                              │
+│ Persistence: Firebase Anonymous Auth (survives app restart, not reinstall)  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       USER TYPE 2: GOOGLE SIGNED-IN USER                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Definition: User authenticated via Google Sign-In                           │
+│                                                                              │
+│ Capabilities:                                                                │
+│   ✓ All anonymous user capabilities                                         │
+│   ✓ Auto-discover flights from Gmail inbox                                  │
+│   ✓ Real-time Gmail monitoring (new bookings auto-added)                    │
+│   ✓ Data synced across devices                                              │
+│   ✓ Persistent across reinstalls                                            │
+│                                                                              │
+│ Sub-states:                                                                  │
+│   A. Gmail NOT connected (signed in but no Gmail scope granted)             │
+│   B. Gmail connected (full functionality)                                   │
+│   C. Gmail token expired (needs re-authentication)                          │
+│                                                                              │
+│ Persistence: Firebase Auth with Google provider, Firestore sync             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                    SCREEN 1: HOMEPAGE (FLIGHT LIST)
+================================================================================
+
+PURPOSE: Display all user's flights organized by temporal relevance
+
+--------------------------------------------------------------------------------
+SECTION A: PAGE-LEVEL STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.1: LOADING STATE                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Initial app launch, pull-to-refresh, returning from background     │
+│                                                                              │
+│ UI Requirements:                                                            │
+│   - Skeleton loaders for flight cards                                       │
+│   - Loading spinner in header/refresh indicator                             │
+│   - Disable interactive elements during load                                │
+│                                                                              │
+│ Duration: Max 10 seconds before showing error/timeout state                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.2: EMPTY STATE - NO FLIGHTS                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: User has no flights added (new user or all flights deleted)        │
+│                                                                              │
+│ For ANONYMOUS USER:                                                          │
+│   - Show illustration/graphic                                               │
+│   - Primary CTA: "Add Your First Flight"                                    │
+│   - Secondary CTA: "Sign in with Google to auto-import"                     │
+│   - Brief explanation of manual add flow                                    │
+│                                                                              │
+│ For GOOGLE USER (Gmail NOT connected):                                       │
+│   - Show illustration/graphic                                               │
+│   - Primary CTA: "Connect Gmail to Import Flights"                          │
+│   - Secondary CTA: "Or add flight manually"                                 │
+│   - Explain auto-import feature benefits                                    │
+│                                                                              │
+│ For GOOGLE USER (Gmail connected):                                           │
+│   - Show illustration/graphic                                               │
+│   - Message: "No flights found in your inbox"                               │
+│   - Primary CTA: "Add Flight Manually"                                      │
+│   - Secondary CTA: "Scan Gmail Again"                                       │
+│   - Hint: "Book a flight and we'll find it automatically!"                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.3: ERROR STATE - FETCH FAILED                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Firestore read failure, network error, timeout                     │
+│                                                                              │
+│ UI Requirements:                                                            │
+│   - Error illustration/icon                                                 │
+│   - User-friendly error message (not technical)                             │
+│   - "Retry" button                                                          │
+│   - Show cached data if available (with "Last updated X ago" badge)         │
+│                                                                              │
+│ Error Messages by Type:                                                     │
+│   - Network: "No internet connection. Check your network and try again."   │
+│   - Timeout: "Taking too long. Please try again."                          │
+│   - Server: "Something went wrong. We're working on it."                   │
+│   - Auth: "Session expired. Please sign in again."                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.4: OFFLINE STATE                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Device loses network connectivity                                  │
+│                                                                              │
+│ UI Requirements:                                                            │
+│   - Persistent banner: "You're offline. Showing cached data."              │
+│   - Display cached flights from Firestore offline persistence              │
+│   - Disable actions requiring network (refresh, add flight)                │
+│   - Auto-refresh when connection restored                                   │
+│   - Show "Last synced: X minutes ago"                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.5: GMAIL SYNC IN PROGRESS                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: User initiated Gmail scan or background sync running               │
+│                                                                              │
+│ UI Requirements:                                                            │
+│   - Progress indicator in header                                            │
+│   - "Scanning emails... X of Y" (if batch info available)                  │
+│   - Allow user to continue using app                                        │
+│   - New flights appear with subtle animation as discovered                  │
+│   - Toast notification when scan completes                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 1.6: GMAIL TOKEN EXPIRED                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Refresh token invalid, user revoked access, token too old          │
+│                                                                              │
+│ UI Requirements:                                                            │
+│   - Non-blocking banner: "Gmail disconnected. Reconnect to keep syncing."  │
+│   - CTA button: "Reconnect Gmail"                                          │
+│   - Allow manual flight management to continue                              │
+│   - Don't block access to existing flights                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION B: FLIGHT LIST ORGANIZATION
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CATEGORY 1: NEXT FLIGHT (Hero Section)                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Definition: The chronologically next upcoming flight                        │
+│                                                                              │
+│ Display Rules:                                                              │
+│   - Show as larger, featured card at top                                    │
+│   - Include countdown timer ("Departing in 3h 42m")                         │
+│   - Show more details inline (gate, terminal, weather)                      │
+│   - Quick action buttons (directions, check-in link)                        │
+│                                                                              │
+│ Edge Cases:                                                                 │
+│   - Flight is TODAY: Highlight prominently, show real-time status          │
+│   - Flight departs within 4 hours: Show urgent styling                     │
+│   - Flight is currently ACTIVE (in air): Show as "In Flight" with tracker  │
+│   - No upcoming flights: Don't show this section                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CATEGORY 2: UPCOMING FLIGHTS                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Definition: All flights with departure time in the future (excluding next)  │
+│                                                                              │
+│ Display Rules:                                                              │
+│   - Sorted by departure time (soonest first)                               │
+│   - Grouped by month/date if many flights                                  │
+│   - Standard card size                                                      │
+│   - Show: Route, date/time, airline, flight number                         │
+│                                                                              │
+│ Edge Cases:                                                                 │
+│   - Only 1 upcoming flight: Show as "Next Flight" hero, skip this section  │
+│   - No upcoming flights: Show "No upcoming flights" with add CTA           │
+│   - 10+ flights: Implement pagination or "Show More"                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CATEGORY 3: PAST FLIGHTS                                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Definition: Flights where arrival time has passed                           │
+│                                                                              │
+│ Display Rules:                                                              │
+│   - Sorted by departure time (most recent first)                           │
+│   - Collapsed/minimized by default                                         │
+│   - Greyed out or muted styling                                            │
+│   - Option to expand section header to view all                            │
+│   - Show final status (landed, cancelled, diverted)                        │
+│                                                                              │
+│ Retention Policy:                                                           │
+│   - Keep flights for X months (configurable)                               │
+│   - Option to archive or delete                                            │
+│   - Show flight count: "Past Flights (12)"                                 │
+│                                                                              │
+│ Edge Cases:                                                                 │
+│   - Flight landed but user hasn't opened app: Mark as complete             │
+│   - Cancelled flight: Show with "Cancelled" badge                          │
+│   - Diverted flight: Show actual destination                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION C: INDIVIDUAL FLIGHT CARD STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FLIGHT STATUS STATES (from Cirium API)                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ STATUS 'S' - SCHEDULED                                                      │
+│ ─────────────────────────                                                   │
+│ Description: Flight is scheduled, not yet departed                          │
+│ Visual: Default card styling                                                │
+│ Badge: None or "Scheduled"                                                  │
+│ Actions: View details, delete, set reminder                                 │
+│                                                                              │
+│ STATUS 'A' - ACTIVE (In Flight)                                             │
+│ ─────────────────────────────                                               │
+│ Description: Flight has departed and is in the air                          │
+│ Visual: Highlighted/accent card, airplane icon animation                    │
+│ Badge: "In Flight" with pulsing indicator                                   │
+│ Show: Progress bar (distance traveled), ETA, live map link                  │
+│ Actions: View live tracker, share ETA                                       │
+│                                                                              │
+│ STATUS 'L' - LANDED                                                         │
+│ ─────────────────────────                                                   │
+│ Description: Flight has arrived at destination                              │
+│ Visual: Success green accent, checkmark icon                                │
+│ Badge: "Landed" with timestamp                                              │
+│ Show: Actual arrival time, baggage belt (if available)                      │
+│ Actions: View summary, rate experience, delete                              │
+│                                                                              │
+│ STATUS 'C' - CANCELLED                                                      │
+│ ────────────────────────                                                    │
+│ Description: Flight has been cancelled                                      │
+│ Visual: Red/danger styling, strikethrough on times                          │
+│ Badge: "CANCELLED" prominently displayed                                    │
+│ Show: Cancellation notice, rebooking suggestions                            │
+│ Actions: Contact airline link, delete, check alternatives                   │
+│                                                                              │
+│ STATUS 'D' - DIVERTED                                                       │
+│ ───────────────────────                                                     │
+│ Description: Flight diverted to different airport                           │
+│ Visual: Warning/orange styling                                              │
+│ Badge: "DIVERTED"                                                           │
+│ Show: Original destination crossed out, new destination highlighted         │
+│ Actions: View new arrival info, get directions to new airport               │
+│                                                                              │
+│ STATUS 'R' - REDIRECTED                                                     │
+│ ─────────────────────────                                                   │
+│ Description: Flight redirected (similar to diverted)                        │
+│ Visual: Warning styling                                                     │
+│ Badge: "REDIRECTED"                                                         │
+│ Show: New route information                                                 │
+│                                                                              │
+│ STATUS 'U' - UNKNOWN                                                        │
+│ ───────────────────────                                                     │
+│ Description: Status cannot be determined                                    │
+│ Visual: Muted/grey styling                                                  │
+│ Badge: "Status Unknown"                                                     │
+│ Show: Last known information, "Updating..." indicator                       │
+│ Actions: Manual refresh, contact airline                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GATE & TERMINAL STATES                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ STATE: GATE NOT ANNOUNCED                                                   │
+│ ─────────────────────────                                                   │
+│ Trigger: departureGate is null/undefined                                    │
+│ Display: "Gate: TBA" or "Gate: --"                                         │
+│ Visual: Muted text, clock icon                                             │
+│ Tip: "Gates usually announced 2-4 hours before departure"                  │
+│                                                                              │
+│ STATE: GATE ANNOUNCED                                                       │
+│ ─────────────────────────                                                   │
+│ Trigger: departureGate has value                                            │
+│ Display: "Gate: B42" prominently                                           │
+│ Visual: Highlighted, pin/location icon                                      │
+│ If terminal available: "Terminal 2 · Gate B42"                             │
+│                                                                              │
+│ STATE: GATE CHANGED                                                         │
+│ ─────────────────────────                                                   │
+│ Trigger: Cirium alert with GATE_CHANGE event                                │
+│ Display: Old gate crossed out, new gate highlighted                         │
+│ Visual: Warning amber indicator, "Gate Changed!" badge                      │
+│ Action: Show notification if user has app in background                     │
+│ Example: "Gate: ~~A12~~ → **B27**"                                         │
+│                                                                              │
+│ STATE: TERMINAL ONLY (No Gate Yet)                                          │
+│ ─────────────────────────────────                                           │
+│ Trigger: departureTerminal exists but departureGate is null                 │
+│ Display: "Terminal 3 · Gate TBA"                                           │
+│                                                                              │
+│ STATE: ARRIVAL GATE                                                         │
+│ ────────────────────                                                        │
+│ Same states as departure gate for arrivalGate/arrivalTerminal               │
+│                                                                              │
+│ STATE: BAGGAGE BELT ANNOUNCED                                               │
+│ ─────────────────────────────                                               │
+│ Trigger: baggageBelt has value (usually after landing)                      │
+│ Display: "Baggage: Belt 7"                                                 │
+│ Visual: Luggage icon, highlighted                                           │
+│ When: Only show for landed flights or flights landing soon                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DELAY STATES                                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ STATE: ON TIME                                                              │
+│ ──────────────                                                              │
+│ Trigger: delayMinutes = 0 or null/undefined                                 │
+│ Display: "On Time" badge (green)                                           │
+│ Visual: Green checkmark or clock icon                                       │
+│                                                                              │
+│ STATE: MINOR DELAY (1-15 minutes)                                           │
+│ ─────────────────────────────────                                           │
+│ Display: "Delayed 10 min" (yellow/amber)                                   │
+│ Visual: Small warning indicator                                             │
+│ Show: Original time with new estimated time                                 │
+│ Example: "Departs: ~~14:30~~ 14:40 (+10m)"                                 │
+│                                                                              │
+│ STATE: MODERATE DELAY (16-60 minutes)                                       │
+│ ──────────────────────────────────────                                      │
+│ Display: "Delayed 45 min" (orange)                                         │
+│ Visual: Warning icon, larger badge                                          │
+│ Show: Original and new times clearly                                        │
+│ Consider: Show delay reason if available                                    │
+│                                                                              │
+│ STATE: SIGNIFICANT DELAY (61+ minutes)                                      │
+│ ──────────────────────────────────────                                      │
+│ Display: "Delayed 2h 15m" (red/danger)                                     │
+│ Visual: Prominent alert styling                                             │
+│ Show: "Check with airline for updates"                                     │
+│ Action: Quick link to airline contact                                       │
+│                                                                              │
+│ STATE: EARLY DEPARTURE/ARRIVAL                                              │
+│ ──────────────────────────────                                              │
+│ Trigger: Estimated time < Scheduled time                                    │
+│ Display: "5 min early" (blue/positive)                                     │
+│ Visual: Subtle positive indicator                                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DATA ENRICHMENT STATES                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ PERFORMANCE RATING STATES                                                   │
+│ ─────────────────────────                                                   │
+│                                                                              │
+│   NOT AVAILABLE:                                                            │
+│   - Trigger: performanceRating is null/undefined                            │
+│   - Display: Don't show rating section                                      │
+│   - Reason: New route, limited data, API failure                            │
+│                                                                              │
+│   POOR (0-1 stars, <70% on-time):                                          │
+│   - Display: 1 star, "Often Delayed"                                       │
+│   - Visual: Red/warning indicator                                           │
+│   - Detail: "X% on-time over N flights"                                    │
+│                                                                              │
+│   FAIR (2 stars, 70-79% on-time):                                          │
+│   - Display: 2 stars, "Sometimes Delayed"                                  │
+│   - Visual: Orange indicator                                                │
+│                                                                              │
+│   GOOD (3 stars, 80-89% on-time):                                          │
+│   - Display: 3 stars, "Usually On Time"                                    │
+│   - Visual: Yellow/neutral                                                  │
+│                                                                              │
+│   EXCELLENT (4 stars, 90%+ on-time):                                       │
+│   - Display: 4 stars, "Excellent Record"                                   │
+│   - Visual: Green indicator                                                 │
+│                                                                              │
+│ WEATHER STATES                                                              │
+│ ──────────────                                                              │
+│                                                                              │
+│   NOT LOADED:                                                               │
+│   - Show placeholder or loading indicator                                   │
+│                                                                              │
+│   CLEAR/GOOD:                                                               │
+│   - Icon: Sun, few clouds                                                   │
+│   - Temp + brief description                                                │
+│                                                                              │
+│   POOR/CONCERNING:                                                          │
+│   - Icon: Storm, snow, fog                                                  │
+│   - Warning: "Weather Advisory" badge                                       │
+│   - Detail: Wind speed, visibility if relevant                              │
+│                                                                              │
+│   UNAVAILABLE:                                                              │
+│   - Don't show weather section                                              │
+│   - Or show "Weather data unavailable"                                      │
+│                                                                              │
+│ EQUIPMENT/AIRCRAFT STATES                                                   │
+│ ──────────────────────────                                                  │
+│                                                                              │
+│   KNOWN:                                                                    │
+│   - Display: "Boeing 787-9 Dreamliner"                                     │
+│   - Badge: "Wide-body" or "Regional"                                       │
+│                                                                              │
+│   UNKNOWN:                                                                  │
+│   - Don't show aircraft section                                             │
+│   - Or show equipment code only: "Equipment: 789"                          │
+│                                                                              │
+│   CHANGED:                                                                  │
+│   - If equipment differs from booking: "Aircraft changed"                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DATA LOADING STATES (Per Flight Card)                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ FLIGHT JUST ADDED (Enrichment in Progress)                                  │
+│ ──────────────────────────────────────────                                  │
+│ Trigger: onFlightCreated trigger is processing                              │
+│ Display:                                                                    │
+│   - Basic info shown immediately (route, times, airline)                   │
+│   - "Fetching live status..." indicator                                    │
+│   - Skeleton loaders for weather, rating, equipment sections               │
+│ Duration: Usually 2-5 seconds                                               │
+│                                                                              │
+│ ENRICHMENT COMPLETE                                                         │
+│ ──────────────────                                                          │
+│ Trigger: All Cirium data fetched and stored                                 │
+│ Display: Full flight card with all details                                  │
+│ Visual: Subtle "Updated just now" indicator                                 │
+│                                                                              │
+│ ENRICHMENT PARTIAL FAILURE                                                  │
+│ ──────────────────────────                                                  │
+│ Trigger: Some API calls failed (e.g., weather unavailable)                  │
+│ Display: Show available data, hide failed sections                          │
+│ Don't: Show error for each failed component                                 │
+│                                                                              │
+│ ENRICHMENT TOTAL FAILURE                                                    │
+│ ─────────────────────────                                                   │
+│ Trigger: Cirium API completely unavailable                                  │
+│ Display: Basic flight info from booking                                     │
+│ Badge: "Limited data available"                                            │
+│ Action: "Tap to retry" or auto-retry in background                         │
+│                                                                              │
+│ STALE DATA                                                                  │
+│ ──────────                                                                  │
+│ Trigger: fetchedAt timestamp > X hours old                                  │
+│ Display: Show data but with "Updated 6 hours ago"                          │
+│ Action: Background refresh on app foreground                                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION D: USER-SPECIFIC STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ANONYMOUS USER SPECIFIC STATES                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ FIRST LAUNCH                                                                │
+│ ────────────                                                                │
+│ - Onboarding explaining manual add flow                                     │
+│ - Highlight benefits of Google sign-in                                      │
+│ - Skip option to continue anonymously                                       │
+│                                                                              │
+│ CONVERSION PROMPTS                                                          │
+│ ──────────────────                                                          │
+│ Show sign-in prompts at strategic moments:                                  │
+│   - After adding 2nd manual flight: "Auto-import all your flights"         │
+│   - When viewing past flights: "Never lose your travel history"            │
+│   - On device change: "Sign in to access your flights"                     │
+│                                                                              │
+│ DATA LOSS WARNING                                                           │
+│ ──────────────────                                                          │
+│ Before app uninstall or logout:                                             │
+│   - Warn: "Your flights will be lost. Sign in to save them."               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ GOOGLE USER SPECIFIC STATES                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ GMAIL NOT CONNECTED                                                         │
+│ ───────────────────                                                         │
+│ - Show banner: "Connect Gmail to auto-import flights"                      │
+│ - CTA in empty state and settings                                          │
+│ - Don't block manual flight add                                            │
+│                                                                              │
+│ GMAIL CONNECTED - NO NEW FLIGHTS FOUND                                      │
+│ ───────────────────────────────────────                                     │
+│ - Show: "All caught up! No new flights in your inbox"                      │
+│ - Last scan time: "Last checked: 2 hours ago"                              │
+│ - CTA: "Scan again" (if user suspects missing flights)                     │
+│                                                                              │
+│ GMAIL CONNECTED - FLIGHTS FOUND                                             │
+│ ────────────────────────────────                                            │
+│ - Show success toast: "Found 3 new flights!"                               │
+│ - New flights highlighted with "New" badge temporarily                      │
+│                                                                              │
+│ GMAIL PARSE FAILURE                                                         │
+│ ───────────────────                                                         │
+│ - When email couldn't be parsed:                                           │
+│   - Log internally, don't show error to user                               │
+│   - Or: "Some emails couldn't be imported. Add manually?"                  │
+│                                                                              │
+│ BACKGROUND SYNC NOTIFICATION                                                │
+│ ────────────────────────────                                                │
+│ - When new flight auto-discovered via Gmail watch:                         │
+│   - Push notification: "New flight found: DEL → SFO on Mar 15"            │
+│   - In-app: New flight appears with animation                              │
+│                                                                              │
+│ PROFILE DISPLAY                                                             │
+│ ───────────────                                                             │
+│ - Show user avatar, name from Google profile                               │
+│ - Email address in settings                                                 │
+│ - Sign out option                                                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                    SCREEN 2: FLIGHT DETAIL PAGE
+================================================================================
+
+PURPOSE: Comprehensive view of a single flight with all available data
+
+--------------------------------------------------------------------------------
+SECTION A: PAGE-LEVEL STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 2.1: LOADING FLIGHT DETAILS                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Navigating to flight detail from list                              │
+│                                                                              │
+│ Display:                                                                    │
+│   - Basic info from list (passed via navigation)                           │
+│   - Skeleton loaders for detailed sections                                 │
+│   - Pull-to-refresh for manual update                                      │
+│                                                                              │
+│ Optimization: Pre-fetch on hover/long-press in list view                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 2.2: FLIGHT NOT FOUND                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Flight deleted, data corrupted, deep link to nonexistent flight    │
+│                                                                              │
+│ Display:                                                                    │
+│   - "Flight not found"                                                     │
+│   - "This flight may have been removed"                                    │
+│   - CTA: "Go back to flights"                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STATE 2.3: REFRESH IN PROGRESS                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Trigger: Pull-to-refresh or auto-refresh                                    │
+│                                                                              │
+│ Display:                                                                    │
+│   - Refresh indicator at top                                               │
+│   - Current data remains visible                                           │
+│   - On completion: Animate changes (if any)                                │
+│   - Toast: "Flight status updated" or "Already up to date"                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION B: FLIGHT DETAIL SECTIONS & STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ HEADER SECTION                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Content:                                                                    │
+│   - Airline logo + name                                                    │
+│   - Flight number (with codeshares if any)                                 │
+│   - Route: DEL → SFO with city names                                       │
+│   - Current status badge (see flight status states above)                  │
+│                                                                              │
+│ States:                                                                     │
+│   - AIRLINE LOGO AVAILABLE: Show logo                                      │
+│   - AIRLINE LOGO MISSING: Show airline code letters as placeholder         │
+│   - CODESHARE FLIGHT: Show "Operated by X" subtitle                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TIMING SECTION                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ For SCHEDULED Flight:                                                       │
+│ ─────────────────────                                                       │
+│   Departure:                                                               │
+│     - Scheduled time (primary)                                             │
+│     - "Boards at: ~30min before"                                           │
+│   Arrival:                                                                 │
+│     - Scheduled time                                                       │
+│     - Flight duration                                                      │
+│                                                                              │
+│ For DELAYED Flight:                                                         │
+│ ───────────────────                                                         │
+│   Departure:                                                               │
+│     - Original time (strikethrough)                                        │
+│     - New estimated time (highlighted)                                     │
+│     - Delay amount: "+45 min"                                              │
+│   Arrival:                                                                 │
+│     - Original time (strikethrough)                                        │
+│     - New estimated time                                                   │
+│                                                                              │
+│ For ACTIVE Flight (In Air):                                                 │
+│ ───────────────────────────                                                 │
+│   Departure:                                                               │
+│     - "Departed at: 14:32" (actual time)                                  │
+│     - If delayed: "Was scheduled for 14:00"                               │
+│   Arrival:                                                                 │
+│     - "ETA: 22:15" (estimated)                                            │
+│     - Progress: "4h 23m remaining"                                         │
+│                                                                              │
+│ For LANDED Flight:                                                          │
+│ ──────────────────                                                          │
+│   Departure:                                                               │
+│     - "Departed: 14:32"                                                   │
+│   Arrival:                                                                 │
+│     - "Arrived: 22:08"                                                    │
+│     - "Total flight time: 7h 36m"                                         │
+│     - If early/late: "+12 min late" or "5 min early"                      │
+│                                                                              │
+│ For CANCELLED Flight:                                                       │
+│ ─────────────────────                                                       │
+│   - Original times shown with strikethrough                                │
+│   - "CANCELLED" overlay                                                    │
+│   - Help text: "Contact airline for rebooking"                             │
+│                                                                              │
+│ Timezone Handling:                                                          │
+│ ──────────────────                                                          │
+│   - Show times in local airport timezone                                   │
+│   - Label: "14:30 IST" and "22:15 PST"                                    │
+│   - User setting: Option to show all times in home timezone               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DEPARTURE AIRPORT SECTION                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Content:                                                                    │
+│   - Airport name + code                                                    │
+│   - City                                                                   │
+│   - Terminal (if known)                                                    │
+│   - Gate (if known)                                                        │
+│   - Weather at airport                                                     │
+│                                                                              │
+│ Gate States: (see Gate & Terminal States above)                             │
+│                                                                              │
+│ Weather Display States:                                                     │
+│ ───────────────────────                                                     │
+│   LOADED:                                                                  │
+│     - Temperature: "24°C / 75°F"                                          │
+│     - Conditions: "Partly Cloudy"                                         │
+│     - Wind: "12 knots NW"                                                 │
+│     - Visibility: "10+ miles"                                             │
+│     - Icon: Weather condition icon                                        │
+│                                                                              │
+│   WEATHER WARNING:                                                         │
+│     - Badge: "Weather Advisory"                                           │
+│     - Details: "Thunderstorms expected"                                   │
+│     - Visual: Warning styling                                              │
+│                                                                              │
+│   NOT AVAILABLE:                                                           │
+│     - "Weather data unavailable"                                          │
+│     - Or: Hide section entirely                                           │
+│                                                                              │
+│ Actions:                                                                    │
+│   - "Get Directions" → Opens Maps app                                      │
+│   - "Airport Info" → Opens airport details                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ARRIVAL AIRPORT SECTION                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Same structure as Departure Airport                                         │
+│                                                                              │
+│ Additional for Landed Flights:                                              │
+│   - Baggage belt number (if available)                                     │
+│   - "Arrived at Gate B42"                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FLIGHT PERFORMANCE SECTION                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Content:                                                                    │
+│   - Star rating (0-4 stars)                                                │
+│   - On-time percentage                                                     │
+│   - Average delay                                                          │
+│   - Based on X observations                                                │
+│                                                                              │
+│ States:                                                                     │
+│                                                                              │
+│   DATA AVAILABLE:                                                          │
+│     - Stars displayed: ★★★★☆                                              │
+│     - "92% on-time"                                                        │
+│     - "Avg delay: 8 min when late"                                        │
+│     - "Based on 847 flights"                                               │
+│     - Color coding: Green (>85%), Yellow (70-85%), Red (<70%)             │
+│                                                                              │
+│   LIMITED DATA:                                                            │
+│     - If observations < 30:                                                │
+│     - Show data with caveat: "Limited data (23 flights)"                  │
+│     - Muted styling                                                        │
+│                                                                              │
+│   DATA UNAVAILABLE:                                                        │
+│     - "Performance data not available"                                    │
+│     - Reason: "New route" or "Seasonal flight"                            │
+│     - Or: Hide section entirely                                           │
+│                                                                              │
+│   CANCELLATION/DIVERSION INFO:                                             │
+│     - If cancellation rate > 2%: "X% cancellation rate"                   │
+│     - Warning badge for high cancellation routes                           │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AIRCRAFT EQUIPMENT SECTION                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Content:                                                                    │
+│   - Aircraft type                                                          │
+│   - Wide-body / Narrow-body indicator                                      │
+│   - Tail number (if tracking inbound)                                      │
+│                                                                              │
+│ States:                                                                     │
+│                                                                              │
+│   EQUIPMENT KNOWN:                                                         │
+│     - "Boeing 787-9 Dreamliner"                                           │
+│     - Badge: "Wide-body Jet"                                              │
+│     - Icon: Aircraft silhouette                                           │
+│                                                                              │
+│   EQUIPMENT CODE ONLY:                                                     │
+│     - "Aircraft: 789"                                                     │
+│     - No additional details                                               │
+│                                                                              │
+│   EQUIPMENT UNKNOWN:                                                       │
+│     - Hide section                                                        │
+│     - Or: "Aircraft type not yet assigned"                                │
+│                                                                              │
+│   EQUIPMENT CHANGED:                                                       │
+│     - "Aircraft changed from A380 to 777"                                 │
+│     - Warning if significant change (wide to narrow body)                  │
+│                                                                              │
+│ Future: Inbound Aircraft Tracking                                           │
+│ ────────────────────────────────                                            │
+│   - "This aircraft is arriving from: JFK"                                  │
+│   - Inbound flight status                                                  │
+│   - "Inbound on-time" or "Inbound delayed 30min"                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PASSENGER & BOOKING SECTION                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ (Only if imported from Gmail with booking details)                          │
+│                                                                              │
+│ Content:                                                                    │
+│   - Passenger name(s)                                                      │
+│   - Booking reference / PNR                                                │
+│   - Seat assignment (if available)                                         │
+│   - Class of service                                                       │
+│   - Baggage allowance                                                      │
+│                                                                              │
+│ States:                                                                     │
+│                                                                              │
+│   FULL BOOKING DATA:                                                       │
+│     - Show all available fields                                            │
+│     - Multiple passengers listed                                           │
+│                                                                              │
+│   PARTIAL DATA:                                                            │
+│     - Show what's available                                                │
+│     - Hide missing fields (don't show "N/A")                              │
+│                                                                              │
+│   MANUAL FLIGHT (No Booking Data):                                         │
+│     - Hide entire section                                                  │
+│     - Or: "Add booking reference" CTA                                     │
+│                                                                              │
+│   SEAT NOT ASSIGNED:                                                       │
+│     - "Seat: Not yet assigned"                                            │
+│     - CTA: "Check-in to select seat"                                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LIVE FLIGHT TRACKER SECTION                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ (Only for ACTIVE flights - in the air)                                      │
+│                                                                              │
+│ Content:                                                                    │
+│   - Map showing current position                                           │
+│   - Progress bar (departure → arrival)                                     │
+│   - Distance remaining                                                     │
+│   - Time remaining                                                         │
+│   - Current altitude, speed (if available)                                 │
+│                                                                              │
+│ States:                                                                     │
+│                                                                              │
+│   LIVE DATA AVAILABLE:                                                     │
+│     - Animated map with aircraft position                                  │
+│     - Real-time updates                                                    │
+│     - "Updated: Just now"                                                 │
+│                                                                              │
+│   LIMITED TRACKING:                                                        │
+│     - Position shown but not real-time                                     │
+│     - "Position approximate"                                               │
+│                                                                              │
+│   TRACKING UNAVAILABLE:                                                    │
+│     - "Live tracking not available"                                       │
+│     - Show estimated progress based on time                                │
+│                                                                              │
+│ When to Show:                                                              │
+│   - Flight status = 'A' (Active)                                          │
+│   - OR within 30 min of departure (prefetch)                              │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION C: ACTION BUTTONS & STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ AVAILABLE ACTIONS BY FLIGHT STATE                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ SCHEDULED (Future Flight):                                                  │
+│   - ✓ Share flight                                                         │
+│   - ✓ Add to calendar                                                      │
+│   - ✓ Set reminder                                                         │
+│   - ✓ Get directions to airport                                            │
+│   - ✓ Delete flight                                                        │
+│   - ✓ Refresh status                                                       │
+│   - ✓ Check-in link (if within window, typically 24-48h before)           │
+│                                                                              │
+│ ACTIVE (In Flight):                                                         │
+│   - ✓ Share ETA                                                            │
+│   - ✓ View on map                                                          │
+│   - ✓ Get directions to arrival airport                                    │
+│   - ✗ Delete (disable during flight)                                       │
+│   - ✓ Refresh status                                                       │
+│                                                                              │
+│ LANDED:                                                                     │
+│   - ✓ Share trip summary                                                   │
+│   - ✓ Get directions from airport                                          │
+│   - ✓ Delete flight                                                        │
+│   - ✗ Calendar/reminder (not applicable)                                   │
+│                                                                              │
+│ CANCELLED:                                                                  │
+│   - ✓ Contact airline                                                      │
+│   - ✓ Search alternative flights                                           │
+│   - ✓ Delete flight                                                        │
+│   - ✓ Share cancellation                                                   │
+│                                                                              │
+│ DIVERTED:                                                                   │
+│   - ✓ Get directions to new airport                                        │
+│   - ✓ Contact airline                                                      │
+│   - ✓ Share update                                                         │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+--------------------------------------------------------------------------------
+SECTION D: NOTIFICATION DISPLAY STATES
+--------------------------------------------------------------------------------
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ALERT HISTORY / NOTIFICATION LOG                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Show recent alerts for this flight:                                         │
+│   - "Gate changed to B42" - 2h ago                                         │
+│   - "Departure delayed 30 min" - 4h ago                                    │
+│   - "Flight tracking started" - 1d ago                                     │
+│                                                                              │
+│ States:                                                                     │
+│   - NO ALERTS: "No updates yet"                                            │
+│   - HAS ALERTS: Chronological list                                         │
+│   - ALERT CAPABILITY LIMITED: "Some alerts not available for this route"   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                         EDGE CASES & ERROR HANDLING
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FLIGHT DATA CONFLICTS                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ BOOKING vs CIRIUM DATA MISMATCH                                             │
+│ ───────────────────────────────                                             │
+│ Scenario: Email shows different times than Cirium                           │
+│ Resolution: Always prefer Cirium data (real-time source)                    │
+│ Display: "Schedule updated since booking"                                   │
+│                                                                              │
+│ DUPLICATE FLIGHTS                                                           │
+│ ─────────────────                                                           │
+│ Scenario: Same flight added manually and via Gmail                          │
+│ Resolution: Merge into single entry, prefer Gmail data for booking details  │
+│ UI: Don't show duplicates in list                                          │
+│                                                                              │
+│ FLIGHT NUMBER CHANGE                                                        │
+│ ────────────────────                                                        │
+│ Scenario: Airline changes flight number                                     │
+│ Resolution: Update flight, notify user                                      │
+│ Display: "Flight number updated: AA123 → AA456"                            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ MULTI-SEGMENT FLIGHTS                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ CONNECTING FLIGHTS                                                          │
+│ ──────────────────                                                          │
+│ Display: Group as single trip with expandable segments                      │
+│ Show: Connection time, risk indicator if tight                             │
+│ Alert: "Your first flight is delayed. Connection at risk."                 │
+│                                                                              │
+│ ROUND TRIP                                                                  │
+│ ──────────                                                                  │
+│ Display: Two separate flight entries, linked visually                       │
+│ Label: "Outbound" / "Return"                                               │
+│                                                                              │
+│ MULTI-CITY                                                                  │
+│ ──────────                                                                  │
+│ Display: Each segment as separate flight                                    │
+│ Group: Under same trip/booking reference                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TIME-BASED TRANSITIONS                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ FLIGHT MOVES TO "NEXT FLIGHT"                                               │
+│ ─────────────────────────────                                               │
+│ Trigger: Previous "next flight" has landed                                  │
+│ Animation: Smooth transition, don't jar user                                │
+│                                                                              │
+│ FLIGHT MOVES TO "PAST"                                                      │
+│ ──────────────────────                                                      │
+│ Trigger: Flight arrival time + buffer (30 min) has passed                   │
+│ Animation: Move to past section with fade                                   │
+│ Note: Don't move if actively viewing the flight                            │
+│                                                                              │
+│ DAY OF TRAVEL                                                               │
+│ ──────────────                                                              │
+│ Trigger: Flight date = today                                               │
+│ UI: Enhanced highlighting, show countdown                                   │
+│ Auto-refresh: More frequent status updates                                  │
+│                                                                              │
+│ CHECK-IN WINDOW OPENS                                                       │
+│ ────────────────────                                                        │
+│ Trigger: 24-48h before departure (airline dependent)                        │
+│ Action: Show "Check-in Now" button                                         │
+│ Notification: Push notification if enabled                                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+                              SUMMARY CHECKLIST
+================================================================================
+
+HOMEPAGE STATES TO HANDLE:
+  □ Loading state
+  □ Empty state (no flights) - per user type
+  □ Error state (fetch failed) - with error types
+  □ Offline state (cached data)
+  □ Gmail sync in progress
+  □ Gmail token expired
+  □ Next flight section (with countdown)
+  □ Upcoming flights list
+  □ Past flights list (collapsed)
+  □ Flight card: All status states (S/A/L/C/D/R/U)
+  □ Flight card: Gate states (TBA, announced, changed)
+  □ Flight card: Delay states (on-time, minor, moderate, significant, early)
+  □ Flight card: Data loading states (enrichment in progress, partial, failed)
+  □ Anonymous user states
+  □ Google user states (Gmail connected/not/expired)
+
+FLIGHT DETAIL PAGE STATES TO HANDLE:
+  □ Loading detail state
+  □ Flight not found
+  □ Refresh in progress
+  □ Header: All flight statuses with appropriate styling
+  □ Timing: Per flight status (scheduled, delayed, active, landed, cancelled)
+  □ Departure airport: Gate, terminal, weather states
+  □ Arrival airport: Gate, terminal, weather, baggage states
+  □ Performance rating: Available, limited, unavailable
+  □ Equipment: Known, code only, unknown, changed
+  □ Passenger/booking: Full, partial, manual flight
+  □ Live tracker: Available, limited, unavailable (active flights only)
+  □ Actions: Context-appropriate per flight status
+  □ Alert history: Has alerts, no alerts
+
+CROSS-CUTTING CONCERNS:
+  □ Timezone handling
+  □ Data conflicts (booking vs live)
+  □ Duplicate detection
+  □ Multi-segment flights
+  □ Time-based transitions
+  □ Error recovery and retry logic
+  □ Offline capability
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================

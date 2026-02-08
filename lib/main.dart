@@ -53,6 +53,46 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// ============================================================
+// TRIP MODEL - Unified model for both flights and trains
+// ============================================================
+
+enum TripType { flight, train }
+
+class Trip {
+  final TripType type;
+  final String id;
+  final DateTime departureDateTime;
+  final DateTime? arrivalDateTime;
+  final String originCity;
+  final String destinationCity;
+  final String transportName; // e.g., "Air India AI 2447" or "Sainik Express"
+  final bool isDelayed;
+  final int? delayMinutes;
+
+  // Flight-specific data
+  final ScheduledFlight? flight;
+  final Appendix? appendix;
+  final String? firestoreId;
+
+  Trip({
+    required this.type,
+    required this.id,
+    required this.departureDateTime,
+    this.arrivalDateTime,
+    required this.originCity,
+    required this.destinationCity,
+    required this.transportName,
+    this.isDelayed = false,
+    this.delayMinutes,
+    this.flight,
+    this.appendix,
+    this.firestoreId,
+  });
+
+  bool get isUpcoming => departureDateTime.isAfter(DateTime.now());
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -60,49 +100,167 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final AuthService _authService = AuthService();
   final CiriumApiService _ciriumService = CiriumApiService();
   GoogleMapController? _mapController;
-  bool _isLoading = false;
 
-  // Add flight state
-  bool _isAddingFlight = false;
-  String _activeField = 'flightNumber'; // 'flightNumber' or 'date'
-  String _flightNumber = '';
-  DateTime? _selectedDate;
-  final TextEditingController _flightNumberController = TextEditingController();
-  final FocusNode _flightNumberFocusNode = FocusNode();
+  // Trips state (combined flights and trains)
+  List<Trip> _trips = [];
+  bool _isLoadingTrips = false;
 
-  // Search result state
-  bool _isSearching = false;
-  bool _hasSearched = false;
-  List<ScheduledFlight> _searchResults = [];
-  Appendix? _appendix;
-  String? _searchError;
-  int? _selectedResultIndex;
+  // Search mode state
+  bool _isSearchMode = false;
+  late AnimationController _searchAnimationController;
+  late Animation<double> _searchSlideAnimation;
+  late Animation<double> _homeSlideAnimation;
+  late Animation<double> _fadeAnimation;
 
-  // Added flights state
-  List<({ScheduledFlight flight, Appendix? appendix, String? firestoreId})> _addedFlights = [];
-  bool _isLoadingFlights = false;
+  // Search input state
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  String _searchQuery = '';
+  bool _showDatePicker = false;
+  DateTime _selectedDate = DateTime.now();
+
+  // Date picker animation
+  late AnimationController _datePickerAnimationController;
+  late Animation<double> _datePickerWidthAnimation;
+
+  // Flight tracking mode state
+  bool _isFlightTrackingMode = false;
+  Trip? _selectedTrip;
+  FlightStatus? _trackingFlightStatus;
+  Appendix? _trackingAppendix;
+  late AnimationController _flightTrackingAnimationController;
+  late Animation<double> _flightTrackingFadeAnimation;
 
   // Cape Town / Brackenfell area - default location from Figma
   static const LatLng _defaultLocation = LatLng(-33.8688, 18.7029);
 
-  // Green accent color used throughout
-  static const Color _accentGreen = Color(0xFF34C759);
-  static const Color _delayedYellow = Color(0xFFD9C700); // Yellow-green for delayed state
+  // Design colors from Figma
+  static const Color _backgroundColor = Color(0xFFF0F0E1);
+  static const Color _searchBarBg = Color(0xFFEEF0EB);
+  static const Color _previousSectionBg = Color(0xFFF5F7F2);
+  static const Color _dateBoxBlue = Color(0xFF006ECF);
+  static const Color _statusBarGreen = Color(0xFF00E439);
+  static const Color _statusBarYellow = Color(0xFFFFBF00);
+  static const Color _onTimeTextGreen = Color(0xFF05B331);
+  static const Color _lateTextYellow = Color(0xFFCA9805);
+
+  // Flight tracking colors from Figma
+  static const Color _stepHighlightYellow = Color(0xFFFFCC00); // #fc0
+  static const Color _onTimeGreen = Color(0xFF34C759);
+  static const Color _badgeBgGray = Color(0xFFF5F7F2);
+  static const Color _dotGray = Color(0xFFE0E0E0);
+
+  // Figma base dimensions
+  static const double _figmaWidth = 390.0;
+
+  // Pattern detection for search input
+  static final RegExp _flightPattern = RegExp(r'^[A-Za-z]{2,3}\d+$');
+  static final RegExp _trainPattern = RegExp(r'^\d{5}$');
 
   @override
   void initState() {
     super.initState();
+    _initAnimations();
     _initAuthService();
-    
-    _flightNumberController.addListener(() {
-      setState(() {
-        _flightNumber = _flightNumberController.text;
-      });
+    _searchController.addListener(_onSearchChanged);
+  }
+
+  // ==========================================================
+  // STANDARD TRANSITION SETTINGS (use consistently across app)
+  // Duration: 280ms
+  // Curve: Curves.easeOutQuart
+  // Slide: 20% of width (subtle movement)
+  // Always combine slide with fade for smooth crossfade
+  // ==========================================================
+
+  void _initAnimations() {
+    // Main search/home transition animation - subtle and smooth
+    _searchAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 280),
+      vsync: this,
+    );
+
+    // Subtle slide - only 20% of screen width for gentle movement
+    _searchSlideAnimation = Tween<double>(
+      begin: 0.2,  // Start slightly to the right
+      end: 0.0,    // End at center
+    ).animate(CurvedAnimation(
+      parent: _searchAnimationController,
+      curve: Curves.easeOutQuart,
+    ));
+
+    _homeSlideAnimation = Tween<double>(
+      begin: 0.0,   // Start at center
+      end: -0.2,   // End slightly to the left
+    ).animate(CurvedAnimation(
+      parent: _searchAnimationController,
+      curve: Curves.easeOutQuart,
+    ));
+
+    _fadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _searchAnimationController,
+      curve: Curves.easeOutQuart,
+    ));
+
+    // Date picker width animation - short but very smooth
+    _datePickerAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 280),
+      vsync: this,
+    );
+
+    _datePickerWidthAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _datePickerAnimationController,
+      curve: Curves.easeOutQuart,
+    ));
+
+    // Flight tracking mode animation - slide transition
+    _flightTrackingAnimationController = AnimationController(
+      duration: const Duration(milliseconds: 280),
+      vsync: this,
+    );
+
+    _flightTrackingFadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _flightTrackingAnimationController,
+      curve: Curves.easeOutQuart,
+    ));
+  }
+
+  void _onSearchChanged() {
+    final query = _searchController.text.trim();
+    final shouldShowDatePicker = _isFlightOrTrainNumber(query);
+
+    setState(() {
+      _searchQuery = query;
     });
+
+    if (shouldShowDatePicker != _showDatePicker) {
+      setState(() {
+        _showDatePicker = shouldShowDatePicker;
+      });
+      if (shouldShowDatePicker) {
+        _datePickerAnimationController.forward();
+      } else {
+        _datePickerAnimationController.reverse();
+      }
+    }
+  }
+
+  bool _isFlightOrTrainNumber(String query) {
+    if (query.isEmpty) return false;
+    return _flightPattern.hasMatch(query) || _trainPattern.hasMatch(query);
   }
 
   Future<void> _initAuthService() async {
@@ -124,21 +282,33 @@ class _HomePageState extends State<HomePage> {
       await NotificationService().init(_authService.userId!);
     }
 
-    // Load flights from Firestore
-    await _loadFlightsFromFirestore();
+    // Load trips from Firestore
+    await _loadTrips();
   }
 
-  Future<void> _loadFlightsFromFirestore() async {
+  Future<void> _loadTrips() async {
     if (!_authService.hasAuth) return;
 
-    setState(() => _isLoadingFlights = true);
+    setState(() => _isLoadingTrips = true);
 
     try {
       final flightsData = await _authService.loadFlights();
-      final loadedFlights = <({ScheduledFlight flight, Appendix? appendix, String? firestoreId})>[];
+      final loadedTrips = <Trip>[];
 
       for (final data in flightsData) {
-        // Reconstruct ScheduledFlight from stored data
+        // Parse departure time
+        DateTime? departureDateTime;
+        if (data['departureTime'] != null) {
+          try {
+            departureDateTime = DateTime.parse(data['departureTime']);
+          } catch (e) {
+            debugPrint('[Airtime] Error parsing departure time: $e');
+          }
+        }
+
+        if (departureDateTime == null) continue;
+
+        // Reconstruct ScheduledFlight for navigation to detail page
         final flight = ScheduledFlight(
           carrierFsCode: data['carrierFsCode'] ?? '',
           flightNumber: data['flightNumber'] ?? '',
@@ -159,7 +329,7 @@ class _HomePageState extends State<HomePage> {
           referenceCode: data['referenceCode'],
         );
 
-        // Reconstruct minimal Appendix for display (airline and airport info)
+        // Reconstruct minimal Appendix for display
         Appendix? appendix;
         if (data['airlineName'] != null || data['originCity'] != null || data['destinationCity'] != null) {
           appendix = Appendix(
@@ -204,548 +374,323 @@ class _HomePageState extends State<HomePage> {
           );
         }
 
-        loadedFlights.add((flight: flight, appendix: appendix, firestoreId: data['id'] as String?));
+        // Build transport name (e.g., "Air India AI 2447")
+        final airlineName = data['airlineName'] ?? data['carrierFsCode'] ?? '';
+        final fullFlightNumber = data['fullFlightNumber'] ?? '${data['carrierFsCode']}${data['flightNumber']}';
+        final transportName = '$airlineName $fullFlightNumber';
+
+        loadedTrips.add(Trip(
+          type: TripType.flight,
+          id: data['id'] ?? '',
+          departureDateTime: departureDateTime,
+          arrivalDateTime: data['arrivalTime'] != null ? DateTime.tryParse(data['arrivalTime']) : null,
+          originCity: data['originCity'] ?? data['originAirport'] ?? '',
+          destinationCity: data['destinationCity'] ?? data['destinationAirport'] ?? '',
+          transportName: transportName,
+          isDelayed: false, // Will be updated by delay check
+          flight: flight,
+          appendix: appendix,
+          firestoreId: data['id'] as String?,
+        ));
       }
+
+      // Sort trips by departure date (soonest first)
+      loadedTrips.sort((a, b) => a.departureDateTime.compareTo(b.departureDateTime));
 
       setState(() {
-        _addedFlights = loadedFlights;
-        _isLoadingFlights = false;
+        _trips = loadedTrips;
+        _isLoadingTrips = false;
       });
 
-      debugPrint('[Airtime] Loaded ${loadedFlights.length} flights');
+      debugPrint('[Airtime] Loaded ${loadedTrips.length} trips');
+
+      // Check for delays in background
+      _checkDelaysForTrips();
     } catch (e) {
-      debugPrint('[Airtime] Error loading flights: $e');
-      setState(() => _isLoadingFlights = false);
+      debugPrint('[Airtime] Error loading trips: $e');
+      setState(() => _isLoadingTrips = false);
     }
   }
 
-  Future<void> _handleGoogleSignIn() async {
-    debugPrint('[Airtime] --- Google Sign In Started ---');
-    setState(() => _isLoading = true);
+  Future<void> _checkDelaysForTrips() async {
+    for (int i = 0; i < _trips.length; i++) {
+      final trip = _trips[i];
+      if (trip.type == TripType.flight && trip.flight != null) {
+        try {
+          final response = await _ciriumService.getFlightStatusByFlightNumber(
+            flight: trip.flight!.fullFlightNumber,
+            year: trip.departureDateTime.year,
+            month: trip.departureDateTime.month,
+            day: trip.departureDateTime.day,
+          );
 
-    try {
-      final user = await _authService.signInWithGoogle();
+          if (!response.hasError && response.flightStatuses.isNotEmpty) {
+            final flightStatus = response.flightStatuses.first;
+            final isDelayed = flightStatus.delays?.hasDepartureDelay ?? false;
+            final delayMinutes = flightStatus.delays?.departureGateDelayMinutes ?? 0;
 
-      if (user != null) {
-        debugPrint('[Airtime] Sign in successful!');
-        debugPrint('[Airtime] User ID: ${user.uid}');
-        debugPrint('[Airtime] Email: ${user.email}');
-
-        // Initialize notifications for the signed-in user
-        debugPrint('[Airtime] Initializing notifications...');
-        await NotificationService().init(user.uid);
-
-        // Reload flights (may have been migrated from anonymous account)
-        await _loadFlightsFromFirestore();
-
-        setState(() {});
-      } else {
-        debugPrint('[Airtime] Sign in returned null (user cancelled or error)');
-      }
-    } catch (e, stackTrace) {
-      debugPrint('[Airtime] ERROR during sign in: $e');
-      debugPrint('[Airtime] Stack trace: $stackTrace');
-    } finally {
-      setState(() => _isLoading = false);
-      debugPrint('[Airtime] --- Google Sign In Ended ---');
-    }
-  }
-
-  void _handleAddFlightTap() {
-    setState(() {
-      _isAddingFlight = true;
-      _activeField = 'flightNumber';
-      // Reset search results when starting new flight add
-      _hasSearched = false;
-      _searchResults = [];
-      _appendix = null;
-      _searchError = null;
-      _selectedResultIndex = null;
-    });
-    // Focus the flight number input
-    Future.delayed(const Duration(milliseconds: 100), () {
-      _flightNumberFocusNode.requestFocus();
-    });
-  }
-
-  void _handleDateFieldTap() {
-    // Dismiss keyboard and show calendar
-    _flightNumberFocusNode.unfocus();
-    setState(() {
-      _activeField = 'date';
-    });
-  }
-
-  void _handleFlightNumberFieldTap() {
-    setState(() {
-      _activeField = 'flightNumber';
-      // Reset search when going back to edit flight number
-      _hasSearched = false;
-      _searchResults = [];
-      _appendix = null;
-      _searchError = null;
-      _selectedResultIndex = null;
-    });
-    _flightNumberFocusNode.requestFocus();
-  }
-
-  Future<void> _handleDateSelected(DateTime date) async {
-    setState(() {
-      _selectedDate = date;
-    });
-
-    // Trigger flight search
-    await _searchFlight();
-  }
-
-  Future<void> _searchFlight() async {
-    if (_flightNumber.isEmpty || _selectedDate == null) return;
-
-    setState(() {
-      _isSearching = true;
-      _searchError = null;
-    });
-
-    try {
-      debugPrint('[Airtime] Searching flight: $_flightNumber on ${_selectedDate!.toIso8601String()}');
-      
-      // Use the Schedules API to search for the flight (works for future dates)
-      final response = await _ciriumService.getScheduleByFlightNumber(
-        flight: _flightNumber,
-        year: _selectedDate!.year,
-        month: _selectedDate!.month,
-        day: _selectedDate!.day,
-      );
-
-      if (response.hasError) {
-        setState(() {
-          _searchError = response.error?.errorMessage ?? 'Unknown error occurred';
-          _searchResults = [];
-          _appendix = null;
-        });
-        debugPrint('[Airtime] Search error: $_searchError');
-      } else if (response.scheduledFlights.isEmpty) {
-        setState(() {
-          _searchError = 'No flights found';
-          _searchResults = [];
-          _appendix = null;
-        });
-        debugPrint('[Airtime] No flights found');
-        } else {
-        setState(() {
-          _searchResults = response.scheduledFlights;
-          _appendix = response.appendix;
-          // If only one result, auto-select it
-          if (_searchResults.length == 1) {
-            _selectedResultIndex = 0;
+            if (isDelayed && mounted) {
+              setState(() {
+                _trips[i] = Trip(
+                  type: trip.type,
+                  id: trip.id,
+                  departureDateTime: trip.departureDateTime,
+                  arrivalDateTime: trip.arrivalDateTime,
+                  originCity: trip.originCity,
+                  destinationCity: trip.destinationCity,
+                  transportName: trip.transportName,
+                  isDelayed: true,
+                  delayMinutes: delayMinutes,
+                  flight: trip.flight,
+                  appendix: trip.appendix,
+                  firestoreId: trip.firestoreId,
+                );
+              });
+            }
           }
-        });
-        debugPrint('[Airtime] Found ${_searchResults.length} flight(s)');
-        // Move map to destination airport
-        _moveMapToDestination(_searchResults[0].arrivalAirportFsCode);
+        } catch (e) {
+          debugPrint('[Airtime] Error checking delay for trip ${trip.id}: $e');
+        }
       }
-    } catch (e) {
-      setState(() {
-        _searchError = 'Error: ${e.toString()}';
-        _searchResults = [];
-        _appendix = null;
-      });
-      debugPrint('[Airtime] Search exception: $e');
-    } finally {
-      setState(() {
-        _isSearching = false;
-        _hasSearched = true;
-      });
     }
   }
 
-  Future<void> _handleAcceptFlight() async {
-    if (_selectedResultIndex == null || _searchResults.isEmpty) return;
+  List<Trip> get _upcomingTrips => _trips.where((t) => t.isUpcoming).toList();
+  List<Trip> get _previousTrips => _trips.where((t) => !t.isUpcoming).toList();
 
-    final selectedFlight = _searchResults[_selectedResultIndex!];
-    final appendix = _appendix;
-    debugPrint('[Airtime] User accepted flight: ${selectedFlight.fullFlightNumber}');
+  String _formatMonth(int month) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return months[month - 1];
+  }
 
-    // Get airline and airport info for storage
-    final airlineName = appendix?.getAirline(selectedFlight.carrierFsCode)?.name;
-    final originAirport = appendix?.getAirport(selectedFlight.departureAirportFsCode);
-    final destinationAirport = appendix?.getAirport(selectedFlight.arrivalAirportFsCode);
-
-    // Save to Firestore
-    final flightData = {
-      'carrierFsCode': selectedFlight.carrierFsCode,
-      'flightNumber': selectedFlight.flightNumber,
-      'fullFlightNumber': selectedFlight.fullFlightNumber,
-      'originAirport': selectedFlight.departureAirportFsCode,
-      'destinationAirport': selectedFlight.arrivalAirportFsCode,
-      'departureTime': selectedFlight.departureTime,
-      'arrivalTime': selectedFlight.arrivalTime,
-      'departureDate': selectedFlight.departureDateTime?.toIso8601String().split('T')[0],
-      'stops': selectedFlight.stops,
-      'departureTerminal': selectedFlight.departureTerminal,
-      'arrivalTerminal': selectedFlight.arrivalTerminal,
-      'flightEquipmentIataCode': selectedFlight.flightEquipmentIataCode,
-      'isCodeshare': selectedFlight.isCodeshare,
-      'isWetlease': selectedFlight.isWetlease,
-      'serviceType': selectedFlight.serviceType,
-      'serviceClasses': selectedFlight.serviceClasses,
-      'trafficRestrictions': selectedFlight.trafficRestrictions,
-      'referenceCode': selectedFlight.referenceCode,
-      // Store display info
-      'airlineName': airlineName,
-      'originCity': originAirport?.city,
-      'originAirportName': originAirport?.name,
-      'destinationCity': destinationAirport?.city,
-      'destinationAirportName': destinationAirport?.name,
-    };
-
-    await _authService.saveFlight(flightData);
-
-    // Add the flight to local list for immediate display
+  void _handleSearchTap() {
+    HapticFeedback.mediumImpact();
     setState(() {
-      _addedFlights.add((flight: selectedFlight, appendix: appendix, firestoreId: null));
-      _isAddingFlight = false;
-      _hasSearched = false;
-      _searchResults = [];
-      _appendix = null;
-      _searchError = null;
-      _selectedResultIndex = null;
-      _flightNumber = '';
-      _selectedDate = null;
-      _flightNumberController.clear();
+      _isSearchMode = true;
+    });
+    _searchAnimationController.forward();
+    // Focus the search field after animation starts
+    Future.delayed(const Duration(milliseconds: 100), () {
+      _searchFocusNode.requestFocus();
     });
   }
 
-  void _handleRejectFlight() {
-    debugPrint('[Airtime] User rejected flight');
-    
-    // Reset and allow user to try again
-    setState(() {
-      _isAddingFlight = false;
-      _hasSearched = false;
-      _searchResults = [];
-      _appendix = null;
-      _searchError = null;
-      _selectedResultIndex = null;
-      _flightNumber = '';
-      _selectedDate = null;
-      _flightNumberController.clear();
+  void _handleSearchBack() {
+    HapticFeedback.mediumImpact();
+    _searchFocusNode.unfocus();
+    _searchAnimationController.reverse().then((_) {
+      setState(() {
+        _isSearchMode = false;
+        _searchController.clear();
+        _searchQuery = '';
+        _showDatePicker = false;
+      });
+      _datePickerAnimationController.reset();
     });
   }
 
-  void _handleSelectResult(int index) {
-    setState(() {
-      _selectedResultIndex = index;
-    });
-    // Move map to selected flight's destination
-    _moveMapToDestination(_searchResults[index].arrivalAirportFsCode);
+  void _handleDateTap() {
+    HapticFeedback.lightImpact();
+    _showDatePickerModal();
   }
 
-  void _moveMapToDestination(String airportCode) {
-    if (_appendix == null || _mapController == null) return;
-    
-    final airport = _appendix!.getAirport(airportCode);
-    if (airport == null) return;
-    
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLng(
-        LatLng(airport.latitude, airport.longitude),
+  void _showDatePickerModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => _DatePickerBottomSheet(
+        selectedDate: _selectedDate,
+        onDateSelected: (date) {
+          setState(() {
+            _selectedDate = date;
+          });
+          Navigator.pop(context);
+        },
       ),
     );
   }
 
-  String _formatDate(DateTime date) {
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    return '${date.day} ${months[date.month - 1]}';
+  void _handleProfileTap() {
+    // TODO: Navigate to profile page
+    HapticFeedback.mediumImpact();
+    debugPrint('[Airtime] Profile tapped - to be implemented');
   }
 
-  String _formatTime(DateTime? dateTime) {
-    if (dateTime == null) return '--:--';
-    final hour = dateTime.hour.toString().padLeft(2, '0');
-    final minute = dateTime.minute.toString().padLeft(2, '0');
-    return '$hour:$minute';
+  void _handleTripTap(Trip trip) {
+    HapticFeedback.mediumImpact();
+    if (trip.type == TripType.flight && trip.flight != null) {
+      setState(() {
+        _isFlightTrackingMode = true;
+        _selectedTrip = trip;
+        _trackingAppendix = trip.appendix;
+      });
+      _flightTrackingAnimationController.forward();
+      _fetchTrackingFlightStatus(trip);
+    }
   }
 
-  String _getAirlineName(String carrierCode) {
-    if (_appendix == null) return carrierCode;
-    final airline = _appendix!.getAirline(carrierCode);
-    return airline?.name ?? carrierCode;
+  void _handleFlightTrackingBack() {
+    HapticFeedback.mediumImpact();
+    _flightTrackingAnimationController.reverse().then((_) {
+      setState(() {
+        _isFlightTrackingMode = false;
+        _selectedTrip = null;
+        _trackingFlightStatus = null;
+        _trackingAppendix = null;
+      });
+    });
   }
 
-  String _getAirportCity(String airportCode) {
-    if (_appendix == null) return airportCode;
-    final airport = _appendix!.getAirport(airportCode);
-    return airport?.city ?? airportCode;
+  Future<void> _fetchTrackingFlightStatus(Trip trip) async {
+    if (trip.flight == null) return;
+
+    try {
+      final departureDate = trip.flight!.departureDateTime;
+      if (departureDate == null) return;
+
+      final response = await _ciriumService.getFlightStatusByFlightNumber(
+        flight: trip.flight!.fullFlightNumber,
+        year: departureDate.year,
+        month: departureDate.month,
+        day: departureDate.day,
+      );
+
+      if (!mounted) return;
+
+      if (!response.hasError && response.flightStatuses.isNotEmpty) {
+        setState(() {
+          _trackingFlightStatus = response.flightStatuses.first;
+          _trackingAppendix = response.appendix ?? trip.appendix;
+        });
+      }
+    } catch (e) {
+      debugPrint('[Airtime] Error fetching tracking flight status: $e');
+    }
   }
 
   @override
   void dispose() {
     _mapController?.dispose();
-    _flightNumberController.dispose();
-    _flightNumberFocusNode.dispose();
     _ciriumService.dispose();
+    _searchAnimationController.dispose();
+    _datePickerAnimationController.dispose();
+    _flightTrackingAnimationController.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final screenHeight = MediaQuery.of(context).size.height;
+    final scale = screenWidth / _figmaWidth;
+    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
 
-    // Figma design dimensions
-    const double figmaWidth = 390.0;
-    const double figmaHeight = 844.0;
+    // Figma dimensions scaled
+    final mapHeight = 404.0 * scale;
+    final containerTop = 371.0 * scale;
 
-    // Scale factor for vertical positioning
-    final double scaleY = screenHeight / figmaHeight;
-
-    // Fixed card width (372px in Figma, proportional to screen)
-    final double cardWidth = (372.0 / figmaWidth) * screenWidth;
-
-    // Positions scaled proportionally
-    final double mapHeight = 491.0 * scaleY;
-    final double signInCardTop = 320.0 * scaleY;
-    
-    // Input card position changes based on search state
-    double addFlightCardTop;
-    if (_hasSearched && _searchResults.isNotEmpty) {
-      addFlightCardTop = 527.0 * scaleY; // After search: 527px from Figma
-    } else if (_isAddingFlight) {
-      addFlightCardTop = 441.0 * scaleY; // During input: 441px
-    } else {
-      addFlightCardTop = 418.0 * scaleY; // Zero state: 418px
-    }
-    
-    final double calendarTop = 535.0 * scaleY;
-    final double flightDetailsTop = 629.0 * scaleY;
-    final double actionContainerTop = 727.0 * scaleY;
+    // When keyboard is visible, adjust container to keep input visible
+    // Only adjust based on keyboard, not search mode
+    final keyboardAdjustment = keyboardHeight > 0 ? keyboardHeight * 0.4 : 0.0;
+    final adjustedContainerTop = (containerTop - keyboardAdjustment).clamp(100.0 * scale, containerTop);
 
     return Scaffold(
-      resizeToAvoidBottomInset: false,
-      body: GestureDetector(
-        onTap: () {
-          // Dismiss keyboard when tapping outside
-          if (_isAddingFlight && _activeField == 'flightNumber') {
-            _flightNumberFocusNode.unfocus();
-          }
-        },
-        child: Container(
-          color: const Color(0xFFF0F0E1),
-          child: Stack(
-            children: [
-              // Map container - edge to edge, behind status bar
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: mapHeight,
-                child: GoogleMap(
-                  initialCameraPosition: const CameraPosition(
-                    target: _defaultLocation,
-                    zoom: 11.0,
-                  ),
-                  onMapCreated: (controller) {
-                    _mapController = controller;
-                  },
-                  cloudMapId: '62f0e28a3bd3ee4c493ea929',
-                  zoomControlsEnabled: false,
-                  myLocationButtonEnabled: false,
-                  compassEnabled: false,
-                  mapToolbarEnabled: false,
+      body: Container(
+        color: _backgroundColor,
+        child: Stack(
+          children: [
+            // Map container - full width at top
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: mapHeight,
+              child: GoogleMap(
+                initialCameraPosition: const CameraPosition(
+                  target: _defaultLocation,
+                  zoom: 11.0,
                 ),
+                onMapCreated: (controller) {
+                  _mapController = controller;
+                },
+                cloudMapId: '62f0e28a3bd3ee4c493ea929',
+                zoomControlsEnabled: false,
+                myLocationButtonEnabled: false,
+                compassEnabled: false,
+                mapToolbarEnabled: false,
               ),
+            ),
 
-              // Added flights container (white area at bottom) - hidden when adding flight
-              if (!_isAddingFlight)
-                Positioned(
-                  top: mapHeight,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    color: Colors.white,
-                    child: _addedFlights.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No flights added yet',
-                            style: GoogleFonts.balooBhai2(
-                              fontSize: 27,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.black.withValues(alpha: 0.4),
-                              height: 33 / 27,
+            // White container with content - overlaps map
+            // Follows keyboard height directly for synced animation
+            Positioned(
+              top: _isFlightTrackingMode || _flightTrackingAnimationController.isAnimating
+                  ? 153.0 * scale  // Flight tracking: higher up to show more map
+                  : adjustedContainerTop,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: AnimatedBuilder(
+                animation: Listenable.merge([_searchAnimationController, _flightTrackingAnimationController]),
+                builder: (context, child) {
+                  final searchProgress = _fadeAnimation.value;
+                  final trackingProgress = _flightTrackingFadeAnimation.value;
+
+                  // Input field animates from home position (23px) to search position (93px)
+                  final inputTopHome = 23.0 * scale;
+                  final inputTopSearch = 93.0 * scale;
+                  final inputTop = inputTopHome + (inputTopSearch - inputTopHome) * searchProgress;
+
+                  return Container(
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                    ),
+                    clipBehavior: Clip.hardEdge,
+                    child: Stack(
+                      children: [
+                        // Layer 1: Home/Trips content (slides left and fades out)
+                        Transform.translate(
+                          offset: Offset(-screenWidth * 0.2 * trackingProgress, 0),
+                          child: Opacity(
+                            opacity: (1.0 - searchProgress) * (1.0 - trackingProgress),
+                            child: _buildTripsOnlyContent(scale),
+                          ),
+                        ),
+
+                        // Layer 2: Search header (fades in with slight slide)
+                        if (_isSearchMode || _searchAnimationController.isAnimating)
+                          Transform.translate(
+                            offset: Offset(0, -20 * scale * (1.0 - searchProgress)),
+                            child: Opacity(
+                              opacity: searchProgress * (1.0 - trackingProgress),
+                              child: _buildSearchHeader(scale),
                             ),
                           ),
-                        )
-                      : _buildAddedFlightsList(),
-                  ),
-                ),
 
-              // Calendar component (shown when date field is active and no search yet)
-              if (_isAddingFlight && _activeField == 'date' && !_hasSearched)
-                Positioned(
-                  top: calendarTop,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: _buildCalendarComponent(),
-                ),
+                        // Layer 3: Input field row (hide when flight tracking)
+                        if (!_isFlightTrackingMode && !_flightTrackingAnimationController.isAnimating)
+                          Positioned(
+                            top: inputTop,
+                            left: 19 * scale,
+                            right: 19 * scale,
+                            child: _buildAnimatedInputRow(scale, searchProgress),
+                          ),
 
-              // Sign in with Google card (hidden when adding flight)
-              if (!_isAddingFlight)
-                Positioned(
-                  top: signInCardTop,
-                  left: (screenWidth - cardWidth) / 2,
-                  child: _buildGoogleSignInCard(cardWidth),
-                ),
-
-              // Add flight card / input
-              Positioned(
-                top: addFlightCardTop,
-                left: (screenWidth - cardWidth) / 2,
-                child: _isAddingFlight
-                    ? _buildAddFlightInputCard(cardWidth)
-                    : _buildAddFlightCard(cardWidth),
-              ),
-
-              // Flight details results (shown after search)
-              if (_hasSearched && _searchResults.isNotEmpty)
-                Positioned(
-                  top: flightDetailsTop,
-                  left: 0,
-                  right: 0,
-                  child: _searchResults.length == 1
-                      ? _buildFlightDetailsContainer(_searchResults[0])
-                      : _buildMultipleResultsList(),
-                ),
-
-              // Action container (shown only for single result)
-              if (_hasSearched && _searchResults.length == 1)
-                Positioned(
-                  top: actionContainerTop,
-                  left: 0,
-                  right: 0,
-                  child: _buildActionContainer(),
-                ),
-
-              // Loading indicator during search
-              if (_isSearching)
-                Positioned(
-                  top: flightDetailsTop,
-                  left: 0,
-                  right: 0,
-                  height: 98,
-                  child: Container(
-                    color: Colors.white,
-                    child: const Center(
-                      child: CircularProgressIndicator(
-                        color: _accentGreen,
-                      ),
+                        // Layer 4: Flight tracking content (slides in from right)
+                        if (_isFlightTrackingMode || _flightTrackingAnimationController.isAnimating)
+                          Transform.translate(
+                            offset: Offset(screenWidth * 0.2 * (1.0 - trackingProgress), 0),
+                            child: Opacity(
+                              opacity: trackingProgress,
+                              child: _buildFlightTrackingContent(scale),
+                            ),
+                          ),
+                      ],
                     ),
-                  ),
-            ),
-        ],
-      ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGoogleSignInCard(double cardWidth) {
-    return GestureDetector(
-      onTap: _isLoading ? null : _handleGoogleSignIn,
-      child: Container(
-        width: cardWidth,
-        padding: const EdgeInsets.only(
-          left: 21,
-          right: 21,
-          top: 17,
-          bottom: 15,
-        ),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-            colors: [
-              Color(0xFFEA4335), // Google Red
-              Color(0xFFFBBC05), // Google Yellow
-              Color(0xFF34A853), // Google Green
-              Color(0xFF4285F4), // Google Blue
-            ],
-            stops: [0.0, 0.4158, 0.6608, 1.0],
-          ),
-          borderRadius: BorderRadius.circular(19),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.08),
-              blurRadius: 64,
-              offset: const Offset(0, 4),
-            ),
-        ],
-      ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-            // Left side: Logo + Text
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                // Google Logo
-                Image.asset(
-                  'assets/google_logo.png',
-                  width: 39,
-                  height: 39,
-                  fit: BoxFit.cover,
-                ),
-                const SizedBox(width: 13),
-                // Text content
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-            children: [
-                Text(
-                      'Sign in with Google',
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                        height: 23 / 19,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                Text(
-                      'Automatically add your flights',
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.white.withValues(alpha: 0.57),
-                        height: 21 / 15,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            // Right arrow button
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 1),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-                border: Border.all(
-                  color: Colors.white,
-                  width: 3,
-                ),
-              ),
-              child: SizedBox(
-                height: 35,
-                child: const Center(
-                  child: Icon(
-                    CupertinoIcons.chevron_right,
-                    size: 27,
-                    color: Colors.black,
-                  ),
-                ),
+                  );
+                },
               ),
             ),
           ],
@@ -754,80 +699,43 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildAddFlightCard(double cardWidth) {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.mediumImpact();
-        _handleAddFlightTap();
-      },
-      child: Container(
-        width: cardWidth,
-        padding: const EdgeInsets.only(
-          left: 21,
-          right: 21,
-          top: 21,
-          bottom: 15,
-        ),
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(19),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.08),
-              blurRadius: 64,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          crossAxisAlignment: CrossAxisAlignment.start,
+  // Search header with back button and title (fades in during transition)
+  Widget _buildSearchHeader(double scale) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 17 * scale,
+        right: 17 * scale,
+        top: 27 * scale,
+      ),
+      child: SizedBox(
+        height: 33 * scale,
+        child: Stack(
           children: [
-            // Text content
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Add your flight',
-                  style: GoogleFonts.balooBhai2(
-                    fontSize: 19,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                    height: 23 / 19,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'Enter your flight number',
-                  style: GoogleFonts.balooBhai2(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.white.withValues(alpha: 0.57),
-                    height: 21 / 15,
-                  ),
-                ),
-              ],
-            ),
-            // Plus button with green border
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-                border: Border.all(
-                  color: _accentGreen,
-                  width: 3,
-                ),
-              ),
-              child: SizedBox(
-                height: 35,
-                child: const Center(
+            // Back button
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              child: GestureDetector(
+                onTap: _handleSearchBack,
+                child: Center(
                   child: Icon(
-                    CupertinoIcons.plus,
-                    size: 27,
+                    CupertinoIcons.chevron_left,
+                    size: 27 * scale,
                     color: Colors.black,
                   ),
+                ),
+              ),
+            ),
+            // "Search" title centered
+            Center(
+              child: Text(
+                'Search',
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 27 * scale,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                  height: 33 / 27,
                 ),
               ),
             ),
@@ -837,351 +745,153 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildAddFlightInputCard(double cardWidth) {
-    // After search, both fields have gray border; during input, active field has green
-    final bool showGrayBorders = _hasSearched && _searchResults.isNotEmpty;
-    
-    return Container(
-      width: cardWidth,
-      padding: const EdgeInsets.all(17),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(27),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 64,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          // Flight number field
-          Expanded(
-            child: _buildInputField(
-              isActive: !showGrayBorders && _activeField == 'flightNumber',
-              isFilled: _flightNumber.isNotEmpty,
-              placeholder: 'Flight no.',
-              value: _flightNumber.toUpperCase(),
-              onTap: _handleFlightNumberFieldTap,
-              isTextField: true,
-              forceGrayBorder: showGrayBorders,
-            ),
-          ),
-          const SizedBox(width: 19),
-          // Date field
-          Expanded(
-            child: _buildInputField(
-              isActive: !showGrayBorders && _activeField == 'date',
-              isFilled: _selectedDate != null,
-              placeholder: 'Date',
-              value: _selectedDate != null ? _formatDate(_selectedDate!) : 'Date',
-              onTap: _handleDateFieldTap,
-              isTextField: false,
-              forceGrayBorder: showGrayBorders,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // Animated input row - input stays, profile fades out
+  Widget _buildAnimatedInputRow(double scale, double progress) {
+    final isSearching = _isSearchMode || progress > 0;
 
-  Widget _buildInputField({
-    required bool isActive,
-    required bool isFilled,
-    required String placeholder,
-    required String value,
-    required VoidCallback onTap,
-    required bool isTextField,
-    bool forceGrayBorder = false,
-  }) {
-    // Determine background and border color based on state
-    // After search (forceGrayBorder): white bg, gray border (#CECECE)
-    // Active or filled: white bg, green border, black text
-    // Inactive and unfilled: green bg, green border, white text
-    final bool showWhiteBg = forceGrayBorder || isActive || isFilled;
-    final Color bgColor = showWhiteBg ? Colors.white : _accentGreen;
-    final Color textColor = showWhiteBg ? Colors.black : Colors.white;
-    final Color borderColor = forceGrayBorder ? const Color(0xFFCECECE) : _accentGreen;
-    final String displayText = isFilled ? value : placeholder;
+    return AnimatedBuilder(
+      animation: _datePickerAnimationController,
+      builder: (context, child) {
+        final showDate = _showDatePicker || _datePickerAnimationController.isAnimating;
+        final dateWidthFactor = _datePickerWidthAnimation.value;
 
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 5),
-        decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(11),
-          border: Border.all(
-            color: borderColor,
-            width: 3,
-          ),
-        ),
-        child: isTextField && isActive
-            ? SizedBox(
-                height: 35,
-                child: Center(
-                  child: TextField(
-                    controller: _flightNumberController,
-                    focusNode: _flightNumberFocusNode,
-                    textAlign: TextAlign.center,
-                textCapitalization: TextCapitalization.characters,
-                    style: GoogleFonts.balooBhai2(
-                      fontSize: 27,
-                      fontWeight: FontWeight.w600,
-                      color: textColor,
-                      height: 35 / 27,
-                    ),
-                    decoration: InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: EdgeInsets.zero,
-                      hintText: placeholder,
-                      hintStyle: GoogleFonts.balooBhai2(
-                        fontSize: 27,
-                        fontWeight: FontWeight.w600,
-                        color: textColor,
-                        height: 35 / 27,
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final totalWidth = constraints.maxWidth;
+
+            // Profile button width shrinks as progress increases
+            final profileTotalWidth = (8 * scale + 53 * scale) * (1.0 - progress);
+            final availableForInput = totalWidth - profileTotalWidth;
+
+            // Date field calculations
+            final gap = 17 * scale;
+            final dateWidth = showDate ? ((availableForInput - gap) / 2) * dateWidthFactor : 0.0;
+            final searchWidth = showDate
+                ? availableForInput - dateWidth - (dateWidthFactor > 0 ? gap : 0)
+                : availableForInput;
+
+            return Row(
+              children: [
+                // Search input field
+                SizedBox(
+                  width: searchWidth,
+                  child: GestureDetector(
+                    onTap: isSearching ? null : _handleSearchTap,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 19 * scale,
+                        vertical: 17 * scale,
                       ),
+                      decoration: const BoxDecoration(
+                        color: _searchBarBg,
+                      ),
+                      child: progress > 0.5
+                          ? TextField(
+                              controller: _searchController,
+                              focusNode: _searchFocusNode,
+                              style: GoogleFonts.balooBhai2(
+                                fontSize: 19 * scale,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.black,
+                                height: 27 / 19,
+                              ),
+                              decoration: InputDecoration(
+                                hintText: 'Search',
+                                hintStyle: GoogleFonts.balooBhai2(
+                                  fontSize: 19 * scale,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black.withValues(alpha: 0.5),
+                                  height: 27 / 19,
+                                ),
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                              textInputAction: TextInputAction.search,
+                              textCapitalization: TextCapitalization.characters,
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Search flight or train',
+                                  style: GoogleFonts.balooBhai2(
+                                    fontSize: 19 * scale,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.black,
+                                    height: 27 / 19,
+                                  ),
+                                ),
+                                Icon(
+                                  CupertinoIcons.search,
+                                  size: 22 * scale,
+                                  color: Colors.black,
+                                ),
+                              ],
+                            ),
                     ),
                   ),
                 ),
-              )
-            : SizedBox(
-                height: 35,
-                child: Center(
-                  child: Text(
-                    displayText,
-                    style: GoogleFonts.balooBhai2(
-                      fontSize: 27,
-                      fontWeight: FontWeight.w600,
-                      color: textColor,
-                      height: 35 / 27,
-                    ),
-                  ),
-                ),
-              ),
-      ),
-    );
-  }
 
-  Widget _buildFlightDetailsContainer(ScheduledFlight flight) {
-    // Get departure time from schedule
-    final departureTime = flight.departureDateTime;
-    
-    final airlineName = _getAirlineName(flight.carrierFsCode);
-    final destinationCity = _getAirportCity(flight.arrivalAirportFsCode);
-    
-    // Figma specs:
-    // Flight details container: w-390, h-98, bg-white
-    // Airline: left calc(50%-178px) = 17px, top calc(50%-30px) = 19px, font 17px Medium
-    // Destination: left calc(50%-178px) = 17px, top calc(50%-3px) = 46px, font 27px Bold
-    // Time box: right 19px, bottom 29px, border #34c759 3px, rounded 11px, padding pb-3 pt-7 px-7
-    
-    return Container(
-      width: 390,
-      height: 98,
-      color: Colors.white,
-      child: Stack(
-        children: [
-          // Airline name - left side: left calc(50%-178px), top calc(50%-30px)
-          Positioned(
-            left: 17, // 195 - 178 = 17
-            top: 19, // 49 - 30 = 19
-            child: Text(
-              airlineName,
-              style: GoogleFonts.balooBhai2(
-                fontSize: 17,
-                fontWeight: FontWeight.w500,
-                color: Colors.black,
-                height: 23 / 17,
-              ),
-            ),
-          ),
-          // Destination - left side below airline: left calc(50%-178px), top calc(50%-3px)
-          Positioned(
-            left: 17, // 195 - 178 = 17
-            top: 46, // 49 - 3 = 46
-            child: Text(
-              'To $destinationCity',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 27,
-                fontWeight: FontWeight.w700,
-                color: Colors.black,
-                height: 33 / 27,
-              ),
-            ),
-          ),
-          // Departure time box - right side: right 19px, bottom 29px
-          Positioned(
-            right: 19,
-            bottom: 29,
-            child: Container(
-              padding: const EdgeInsets.only(left: 7, right: 7, top: 7, bottom: 3),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(11),
-                border: Border.all(
-                  color: _accentGreen,
-                  width: 3,
-                ),
-              ),
-              child: Text(
-                _formatTime(departureTime),
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 31,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.black,
-                  height: 35 / 31,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMultipleResultsList() {
-    return Column(
-      children: _searchResults.asMap().entries.map((entry) {
-        final index = entry.key;
-        final flight = entry.value;
-        final isSelected = _selectedResultIndex == index;
-        
-        return GestureDetector(
-          onTap: () => _handleSelectResult(index),
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              border: isSelected
-                  ? Border.all(color: _accentGreen, width: 2)
-                  : null,
-            ),
-            child: _buildFlightDetailsContainer(flight),
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  // Check if flight is delayed (for added flights list)
-  Future<bool> _isFlightDelayed(ScheduledFlight flight) async {
-    try {
-      final departureDate = flight.departureDateTime;
-      if (departureDate == null) return false;
-      
-      final response = await _ciriumService.getFlightStatusByFlightNumber(
-        flight: flight.fullFlightNumber,
-        year: departureDate.year,
-        month: departureDate.month,
-        day: departureDate.day,
-      );
-      
-      if (response.hasError || response.flightStatuses.isEmpty) return false;
-      
-      final flightStatus = response.flightStatuses.first;
-      return flightStatus.delays?.hasDepartureDelay ?? false;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  Widget _buildAddedFlightsList() {
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: _addedFlights.length,
-      itemBuilder: (context, index) {
-        final added = _addedFlights[index];
-        final flight = added.flight;
-        final appendix = added.appendix;
-        
-        final airlineName = appendix?.getAirline(flight.carrierFsCode)?.name ?? flight.carrierFsCode;
-        final destinationCity = appendix?.getAirport(flight.arrivalAirportFsCode)?.city ?? flight.arrivalAirportFsCode;
-        final departureTime = flight.departureDateTime;
-        
-        return FutureBuilder<bool>(
-          future: _isFlightDelayed(flight),
-          builder: (context, snapshot) {
-            final isDelayed = snapshot.data ?? false;
-            final borderColor = isDelayed ? _delayedYellow : _accentGreen;
-            
-            return GestureDetector(
-              onTap: () {
-                HapticFeedback.mediumImpact();
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => FlightTrackingPage(
-                      flight: flight,
-                      appendix: appendix,
-                    ),
-                  ),
-                );
-              },
-              child: Container(
-                width: 390,
-                height: 98,
-                color: Colors.white,
-                child: Stack(
-                  children: [
-                    Positioned(
-                      left: 17,
-                      top: 19,
-                      child: Text(
-                        airlineName,
-                        style: GoogleFonts.balooBhai2(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.black,
-                          height: 23 / 17,
+                // Gap + Date field
+                if (showDate && dateWidthFactor > 0) ...[
+                  SizedBox(width: gap),
+                  SizedBox(
+                    width: dateWidth,
+                    child: Opacity(
+                      opacity: dateWidthFactor,
+                      child: GestureDetector(
+                        onTap: _handleDateTap,
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 19 * scale,
+                            vertical: 17 * scale,
+                          ),
+                          decoration: const BoxDecoration(
+                            color: _searchBarBg,
+                          ),
+                          child: Text(
+                            _formatDateForSearch(_selectedDate),
+                            style: GoogleFonts.balooBhai2(
+                              fontSize: 19 * scale,
+                              fontWeight: FontWeight.w500,
+                              color: Colors.black,
+                              height: 27 / 19,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ),
-                    Positioned(
-                      left: 17,
-                      top: 46,
-                      child: Text(
-                        'To $destinationCity',
-                        style: GoogleFonts.balooBhai2(
-                          fontSize: 27,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.black,
-                          height: 33 / 27,
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      right: 19,
-                      bottom: 29,
+                  ),
+                ],
+
+                // Profile button (fades out)
+                if (progress < 1.0) ...[
+                  SizedBox(width: 8 * scale * (1.0 - progress)),
+                  Opacity(
+                    opacity: 1.0 - progress,
+                    child: GestureDetector(
+                      onTap: _handleProfileTap,
                       child: Container(
-                        padding: const EdgeInsets.only(left: 7, right: 7, top: 7, bottom: 3),
+                        width: 53 * scale * (1.0 - progress),
+                        height: 53 * scale,
                         decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(11),
-                          border: Border.all(
-                            color: borderColor,
-                            width: 3,
-                          ),
+                          color: _searchBarBg,
+                          borderRadius: BorderRadius.circular(60 * scale),
                         ),
-                        child: Text(
-                          _formatTime(departureTime),
-                          style: GoogleFonts.balooBhai2(
-                            fontSize: 31,
-                            fontWeight: FontWeight.w600,
+                        child: Center(
+                          child: Icon(
+                            CupertinoIcons.person_fill,
+                            size: 28 * scale,
                             color: Colors.black,
-                            height: 35 / 31,
                           ),
                         ),
                       ),
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                ],
+              ],
             );
           },
         );
@@ -1189,1072 +899,705 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildActionContainer() {
-    // Action container from Figma: 
-    // bg-black, h-79, w-390, top 727px
-    // X icon (SF Symbol 􀅾): left calc(50%-111px) = 84px, text-[31px]
-    // Checkmark (SF Symbol 􀆅): left calc(50%+82px) = 277px, text-[27px]
-    // Both: top calc(50%-16.5px) = ~23px (centered vertically with 33px line-height)
-    
-    return Container(
-      width: 390,
-      height: 79,
-      color: Colors.black,
-      child: Stack(
-        children: [
-          // X icon (reject) - left side: left calc(50%-111px) = 84px
-          Positioned(
-            left: 84, // 195 - 111 = 84
-            top: 0,
-            bottom: 0,
-            child: GestureDetector(
-              onTap: () {
-                HapticFeedback.lightImpact();
-                _handleRejectFlight();
-              },
-              child: Center(
-                child: Icon(
-                  CupertinoIcons.xmark,
-                  size: 31,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ),
-          // Checkmark icon (accept) - right side: left calc(50%+82px) = 277px
-          Positioned(
-            left: 277, // 195 + 82 = 277
-            top: 0,
-            bottom: 0,
-            child: GestureDetector(
-              onTap: () {
-                HapticFeedback.mediumImpact();
-                _handleAcceptFlight();
-              },
-              child: Center(
-                child: Icon(
-                  CupertinoIcons.checkmark,
-                  size: 27,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // Trips content only (without search bar)
+  Widget _buildTripsOnlyContent(double scale) {
+    // Calculate top padding to account for search bar area
+    final searchBarAreaHeight = 23 * scale + 61 * scale; // top padding + input height
 
-  Widget _buildCalendarComponent() {
-    return Container(
-      color: Colors.white,
+    return SingleChildScrollView(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Title
-          Padding(
-            padding: const EdgeInsets.only(left: 17, top: 17),
-            child: Text(
-              'Select date',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 17,
-                fontWeight: FontWeight.w500,
-                color: Colors.black,
-                height: 23 / 17,
+          // Spacer for search bar area
+          SizedBox(height: searchBarAreaHeight + 12 * scale),
+
+          // "Next up" section
+          if (_upcomingTrips.isNotEmpty) ...[
+            Padding(
+              padding: EdgeInsets.only(
+                left: 19 * scale,
+                top: 35 * scale,
+                bottom: 11 * scale,
+              ),
+              child: Text(
+                'Next up',
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 27 * scale,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black,
+                  height: 33 / 27,
+                ),
               ),
             ),
-          ),
-              const SizedBox(height: 16),
-          // Calendar grid
-          Expanded(
-            child: _buildCalendarGrid(),
-          ),
+            // Upcoming trip cards
+            ..._upcomingTrips.map((trip) => _buildTripCard(trip, scale, isUpcoming: true)),
+          ],
+
+          // "Previous" section
+          if (_previousTrips.isNotEmpty) ...[
+            Container(
+              width: double.infinity,
+              color: _previousSectionBg,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.only(
+                      left: 19 * scale,
+                      top: 27 * scale,
+                      bottom: 11 * scale,
+                    ),
+                    child: Text(
+                      'Previous',
+                      style: GoogleFonts.balooBhai2(
+                        fontSize: 27 * scale,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.black,
+                        height: 33 / 27,
+                      ),
+                    ),
+                  ),
+                  // Previous trip cards
+                  ..._previousTrips.map((trip) => _buildTripCard(trip, scale, isUpcoming: false)),
+                  SizedBox(height: 34 * scale), // Bottom padding
+                ],
+              ),
+            ),
+          ],
+
+          // Empty state
+          if (_trips.isEmpty && !_isLoadingTrips)
+            Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 19 * scale,
+                vertical: 100 * scale,
+              ),
+              child: Center(
+                child: Text(
+                  'No trips yet',
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 27 * scale,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black.withValues(alpha: 0.4),
+                    height: 33 / 27,
+                  ),
+                ),
+              ),
+            ),
+
+          // Loading state
+          if (_isLoadingTrips)
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: 100 * scale),
+              child: const Center(
+                child: CircularProgressIndicator(
+                  color: _dateBoxBlue,
+                ),
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildCalendarGrid() {
-    final now = DateTime.now();
-    final currentMonth = _selectedDate ?? now;
-    final firstDayOfMonth = DateTime(currentMonth.year, currentMonth.month, 1);
-    final lastDayOfMonth = DateTime(currentMonth.year, currentMonth.month + 1, 0);
-    final daysInMonth = lastDayOfMonth.day;
-    final startWeekday = firstDayOfMonth.weekday; // 1 = Monday, 7 = Sunday
-
-    // Day names
-    const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 
+  String _formatDateForSearch(DateTime date) {
+    const months = ['January', 'February', 'March', 'April', 'May', 'June',
                     'July', 'August', 'September', 'October', 'November', 'December'];
+    return '${date.day} ${months[date.month - 1]}';
+  }
 
-    return Column(
-      children: [
-        // Month/Year header with navigation
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 17),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    final newDate = DateTime(currentMonth.year, currentMonth.month - 1, 1);
-                    _selectedDate = _selectedDate != null 
-                        ? DateTime(newDate.year, newDate.month, _selectedDate!.day.clamp(1, DateTime(newDate.year, newDate.month + 1, 0).day))
-                        : newDate;
-                  });
-                },
-                child: const Icon(CupertinoIcons.chevron_left, size: 20, color: Colors.black),
-              ),
-              Text(
-                '${months[currentMonth.month - 1]} ${currentMonth.year}',
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.black,
-                ),
-              ),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    final newDate = DateTime(currentMonth.year, currentMonth.month + 1, 1);
-                    _selectedDate = _selectedDate != null 
-                        ? DateTime(newDate.year, newDate.month, _selectedDate!.day.clamp(1, DateTime(newDate.year, newDate.month + 1, 0).day))
-                        : newDate;
-                  });
-                },
-                child: const Icon(CupertinoIcons.chevron_right, size: 20, color: Colors.black),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        // Day names row
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: dayNames.map((day) => SizedBox(
-              width: 40,
-              child: Center(
-                child: Text(
-                  day,
-                  style: GoogleFonts.balooBhai2(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.black.withValues(alpha: 0.5),
+  // ============================================================
+  // FLIGHT TRACKING CONTENT - Exact Figma Layout
+  // ============================================================
+
+  Widget _buildFlightTrackingContent(double scale) {
+    if (_selectedTrip == null || _selectedTrip!.flight == null) {
+      return const SizedBox.shrink();
+    }
+
+    final flight = _selectedTrip!.flight!;
+    final appendix = _trackingAppendix ?? _selectedTrip!.appendix;
+
+    // Get data
+    final originCity = appendix?.getAirport(flight.departureAirportFsCode)?.city ?? flight.departureAirportFsCode;
+    final destCity = appendix?.getAirport(flight.arrivalAirportFsCode)?.city ?? flight.arrivalAirportFsCode;
+    final airportName = appendix?.getAirport(flight.departureAirportFsCode)?.name ?? flight.departureAirportFsCode;
+    final departureTerminal = _trackingFlightStatus?.airportResources?.departureTerminal ?? flight.departureTerminal;
+    final departureGate = _trackingFlightStatus?.airportResources?.departureGate;
+    final delayMinutes = _trackingFlightStatus?.delays?.departureGateDelayMinutes ?? 0;
+    final hasDelay = delayMinutes > 0;
+    final isOnTime = !hasDelay;
+    final scheduledTime = flight.departureDateTime;
+    final actualTime = _trackingFlightStatus?.operationalTimes?.scheduledGateDeparture?.localDateTime ?? scheduledTime;
+
+    String formatDateShort(DateTime? dt) {
+      if (dt == null) return '';
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return '${dt.day} ${months[dt.month - 1]}';
+    }
+
+    String formatTime(DateTime? dt) {
+      if (dt == null) return '--:--';
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    }
+
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ========== HEADER SECTION ==========
+          // Figma: Status circle at left:19, top:11, Close button at right:31
+          Padding(
+            padding: EdgeInsets.only(left: 19 * scale, right: 19 * scale, top: 11 * scale),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Status circle - Figma: 73x73, inner ring 55x55
+                Container(
+                  width: 73 * scale,
+                  height: 73 * scale,
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
                   ),
-                ),
-              ),
-            )).toList(),
-          ),
-        ),
-        const SizedBox(height: 8),
-        // Calendar days grid
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: GridView.builder(
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 7,
-                childAspectRatio: 1.2,
-              ),
-              itemCount: 42, // 6 weeks * 7 days
-              itemBuilder: (context, index) {
-                // Calculate day number
-                final dayOffset = index - (startWeekday - 1);
-                if (dayOffset < 0 || dayOffset >= daysInMonth) {
-                  return const SizedBox();
-                }
-                final day = dayOffset + 1;
-                final date = DateTime(currentMonth.year, currentMonth.month, day);
-                final isSelected = _selectedDate != null &&
-                    _selectedDate!.year == date.year &&
-                    _selectedDate!.month == date.month &&
-                    _selectedDate!.day == date.day;
-                final isToday = now.year == date.year && 
-                    now.month == date.month && 
-                    now.day == date.day;
-
-                return GestureDetector(
-                  onTap: () {
-                    HapticFeedback.selectionClick();
-                    _handleDateSelected(date);
-                  },
-                  child: Container(
-                    margin: const EdgeInsets.all(2),
-                    decoration: BoxDecoration(
-                      color: isSelected ? _accentGreen : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                      border: isToday && !isSelected
-                          ? Border.all(color: _accentGreen, width: 1)
-                          : null,
-                    ),
-                    child: Center(
-                      child: Text(
-                        '$day',
-                        style: GoogleFonts.balooBhai2(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
-                          color: isSelected ? Colors.white : Colors.black,
+                  child: Center(
+                    child: Container(
+                      width: 55 * scale,
+                      height: 55 * scale,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: isOnTime ? _onTimeGreen : _stepHighlightYellow,
+                          width: 4 * scale,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          hasDelay ? '$delayMinutes' : '✓',
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: hasDelay ? 43 * scale : 28 * scale,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                );
-              },
+                ),
+                // Close button - Figma: SF Symbol at right:31
+                GestureDetector(
+                  onTap: _handleFlightTrackingBack,
+                  child: Padding(
+                    padding: EdgeInsets.only(top: 20 * scale, right: 12 * scale),
+                    child: Icon(
+                      CupertinoIcons.xmark,
+                      size: 24 * scale,
+                      color: Colors.black,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
+
+          // ========== TITLE SECTION ==========
+          // Figma: "Chandigarh to New York, 8 May" at left:19, fontSize:33
+          Padding(
+            padding: EdgeInsets.only(left: 19 * scale, right: 19 * scale, top: 15 * scale),
+            child: Text(
+              '$originCity to $destCity, ${formatDateShort(scheduledTime)}',
+              style: GoogleFonts.balooBhai2(
+                fontSize: 33 * scale,
+                fontWeight: FontWeight.w500,
+                color: Colors.black,
+                height: 45 / 33,
+              ),
+            ),
+          ),
+
+          SizedBox(height: 30 * scale),
+
+          // ========== PROGRESS STEPPER ==========
+          // Figma positions: stepper at left:13, labels at left:69, badges at left:323
+
+          // Step 1: Terminal/Airport
+          _buildProgressStep(
+            scale: scale,
+            label: airportName,
+            sublabel: 'Chhatrapati Shivaji Maharaj',
+            badge: departureTerminal != null ? 'T$departureTerminal' : null,
+            isFilled: true,
+            isCurrent: false,
+            isHighlighted: false,
+            showLine: true,
+          ),
+
+          // Step 2: Gate
+          _buildProgressStep(
+            scale: scale,
+            label: 'Your gate',
+            sublabel: null,
+            badge: departureGate,
+            isFilled: true,
+            isCurrent: false,
+            isHighlighted: false,
+            showLine: true,
+          ),
+
+          // Step 3: Delay/On time (highlighted if delay)
+          _buildProgressStep(
+            scale: scale,
+            label: hasDelay ? '${delayMinutes}minute delay' : 'On time',
+            sublabel: hasDelay ? 'R' : null,
+            badge: null,
+            timeBadgeOld: hasDelay ? formatTime(scheduledTime) : null,
+            timeBadgeNew: hasDelay ? formatTime(actualTime) : null,
+            isFilled: true,
+            isCurrent: hasDelay,
+            isHighlighted: hasDelay,
+            showLine: true,
+          ),
+
+          // Step 4: Future step (empty)
+          _buildProgressStep(
+            scale: scale,
+            label: '',
+            sublabel: null,
+            badge: null,
+            isFilled: false,
+            isCurrent: false,
+            isHighlighted: false,
+            showLine: false,
+          ),
+
+          SizedBox(height: 34 * scale + MediaQuery.of(context).padding.bottom),
+        ],
+      ),
+    );
+  }
+
+  /// Builds a single progress step row matching exact Figma layout
+  /// Figma positions: dot at x=13, label at x=69, badge at x=323
+  Widget _buildProgressStep({
+    required double scale,
+    required String label,
+    String? sublabel,
+    String? badge,
+    String? timeBadgeOld,
+    String? timeBadgeNew,
+    required bool isFilled,
+    required bool isCurrent,
+    required bool isHighlighted,
+    required bool showLine,
+  }) {
+    // Figma measurements
+    const double dotX = 13.0;        // Dot center X position
+    const double labelX = 69.0;      // Label X position
+    const double badgeX = 323.0;     // Badge X position
+    const double dotSize = 17.0;     // Normal dot size
+    const double currentDotSize = 24.0; // Current/highlighted dot size
+
+    final actualDotSize = isCurrent ? currentDotSize : dotSize;
+    final hasTimeBadge = timeBadgeOld != null && timeBadgeNew != null;
+
+    // Row height based on content
+    final rowHeight = sublabel != null ? 86.0 * scale : (label.isEmpty ? 40.0 * scale : 70.0 * scale);
+
+    return Container(
+      height: rowHeight,
+      color: isHighlighted ? _stepHighlightYellow : Colors.transparent,
+      child: Stack(
+        children: [
+          // Vertical connecting line
+          if (showLine)
+            Positioned(
+              left: (dotX + dotSize / 2 - 1) * scale,
+              top: (16 + actualDotSize) * scale,
+              bottom: 0,
+              child: Container(
+                width: 2 * scale,
+                color: _dotGray,
+              ),
+            ),
+
+          // Dot
+          Positioned(
+            left: (dotX + (dotSize - actualDotSize) / 2) * scale,
+            top: 16 * scale,
+            child: Container(
+              width: actualDotSize * scale,
+              height: actualDotSize * scale,
+              decoration: BoxDecoration(
+                color: isCurrent
+                    ? _stepHighlightYellow
+                    : (isFilled ? Colors.black : _dotGray),
+                shape: BoxShape.circle,
+                border: isCurrent
+                    ? Border.all(color: Colors.black, width: 3 * scale)
+                    : null,
+              ),
+            ),
+          ),
+
+          // Label
+          if (label.isNotEmpty)
+            Positioned(
+              left: labelX * scale,
+              top: 12 * scale,
+              right: (390 - badgeX + 19) * scale, // Leave space for badge
+              child: Text(
+                label,
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 20 * scale,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.black,
+                  height: 27 / 20,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+
+          // Sublabel
+          if (sublabel != null)
+            Positioned(
+              left: labelX * scale,
+              top: 40 * scale,
+              child: Text(
+                sublabel,
+                style: GoogleFonts.balooBhai2(
+                  fontSize: 17 * scale,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.black.withValues(alpha: 0.6),
+                  height: 24 / 17,
+                ),
+              ),
+            ),
+
+          // Badge (gray background) or Time badge (yellow background)
+          if (hasTimeBadge)
+            Positioned(
+              right: 19 * scale,
+              top: 12 * scale,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: 12 * scale, vertical: 5 * scale),
+                decoration: BoxDecoration(
+                  color: _stepHighlightYellow,
+                  borderRadius: BorderRadius.circular(7 * scale),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      timeBadgeOld!,
+                      style: GoogleFonts.balooBhai2(
+                        fontSize: 17 * scale,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white.withValues(alpha: 0.6),
+                        height: 25 / 17,
+                        decoration: TextDecoration.lineThrough,
+                        decorationColor: Colors.white.withValues(alpha: 0.6),
+                      ),
+                    ),
+                    SizedBox(width: 10 * scale),
+                    Text(
+                      timeBadgeNew!,
+                      style: GoogleFonts.balooBhai2(
+                        fontSize: 25 * scale,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.white,
+                        height: 31 / 25,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (badge != null)
+            Positioned(
+              left: badgeX * scale,
+              top: 12 * scale,
+              child: Container(
+                padding: EdgeInsets.symmetric(horizontal: 12 * scale, vertical: 7 * scale),
+                decoration: BoxDecoration(
+                  color: _badgeBgGray,
+                  borderRadius: BorderRadius.circular(7 * scale),
+                ),
+                child: Text(
+                  badge,
+                  style: GoogleFonts.balooBhai2(
+                    fontSize: 25 * scale,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.black,
+                    height: 31 / 25,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTripCard(Trip trip, double scale, {required bool isUpcoming}) {
+    // Figma: Upcoming cards are 96px, Previous cards are 109px
+    final cardHeight = isUpcoming ? 96.0 * scale : 109.0 * scale;
+    final dateBoxSize = 47.0 * scale;
+    final statusBarHeight = 7.0 * scale;
+    // Figma: Previous cards have trip info at top 28px, upcoming at top 22px
+    final tripInfoTop = isUpcoming ? 22.0 * scale : 28.0 * scale;
+    // Figma: Previous cards have date box at top 31px (within Date line container at top 19px + 12px offset)
+    final dateBoxTop = isUpcoming ? 21.0 * scale : 31.0 * scale;
+
+    return GestureDetector(
+      onTap: () => _handleTripTap(trip),
+      child: Container(
+        height: cardHeight,
+        width: double.infinity,
+        color: isUpcoming ? Colors.white : _previousSectionBg,
+        child: Stack(
+          children: [
+            // Date box with status bar
+            Positioned(
+              left: 17 * scale,
+              top: dateBoxTop,
+              child: Column(
+                children: [
+                  // Date box
+                  Container(
+                    width: dateBoxSize,
+                    height: dateBoxSize,
+                    decoration: BoxDecoration(
+                      color: isUpcoming ? _dateBoxBlue : Colors.white,
+                      borderRadius: BorderRadius.circular(0),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '${trip.departureDateTime.day}',
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: 27 * scale,
+                            fontWeight: FontWeight.w600,
+                            color: isUpcoming ? Colors.white : Colors.black,
+                            height: 31 / 27,
+                            letterSpacing: 0.81,
+                          ),
+                        ),
+                        Text(
+                          _formatMonth(trip.departureDateTime.month),
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: 15 * scale,
+                            fontWeight: FontWeight.w600,
+                            color: isUpcoming ? Colors.white : Colors.black,
+                            height: 21 / 15,
+                            letterSpacing: 0.45,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Status bar (only for upcoming trips)
+                  if (isUpcoming)
+                    Container(
+                      width: dateBoxSize,
+                      height: statusBarHeight,
+                      color: trip.isDelayed ? _statusBarYellow : _statusBarGreen,
+                    ),
+                ],
+              ),
+            ),
+
+            // Trip info
+            Positioned(
+              left: 85 * scale,
+              top: tripInfoTop,
+              child: SizedBox(
+                width: 241 * scale,
+                height: 51 * scale,
+                child: Stack(
+                  children: [
+                    // Route: "City to City"
+                    Positioned(
+                      left: 0,
+                      top: 0,
+                      child: Text(
+                        '${trip.originCity} to ${trip.destinationCity}',
+                        style: GoogleFonts.balooBhai2(
+                          fontSize: 23 * scale,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black,
+                          height: 29 / 23,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    // Status (ON TIME / LATE) - only for upcoming trips
+                    if (isUpcoming)
+                      Positioned(
+                        left: 0,
+                        bottom: 0,
+                        child: Text(
+                          trip.isDelayed ? 'LATE' : 'ON TIME',
+                          style: GoogleFonts.balooBhai2(
+                            fontSize: 16 * scale,
+                            fontWeight: FontWeight.w700,
+                            color: trip.isDelayed ? _lateTextYellow : _onTimeTextGreen,
+                            height: 20 / 16,
+                          ),
+                        ),
+                      ),
+                    // Transport name (after status for upcoming, or at bottom for previous)
+                    Positioned(
+                      left: isUpcoming ? (trip.isDelayed ? 50 * scale : 70 * scale) : 0,
+                      bottom: 0,
+                      child: Text(
+                        trip.transportName,
+                        style: GoogleFonts.balooBhai2(
+                          fontSize: isUpcoming ? 16 * scale : 14 * scale,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.black.withValues(alpha: 0.6),
+                          height: 20 / 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
-      ],
     );
   }
 }
 
+
 // ============================================================
-// FLIGHT TRACKING PAGE
+// DATE PICKER BOTTOM SHEET
 // ============================================================
 
-class FlightTrackingPage extends StatefulWidget {
-  final ScheduledFlight flight;
-  final Appendix? appendix;
+class _DatePickerBottomSheet extends StatefulWidget {
+  final DateTime selectedDate;
+  final Function(DateTime) onDateSelected;
 
-  const FlightTrackingPage({
-    super.key,
-    required this.flight,
-    this.appendix,
+  const _DatePickerBottomSheet({
+    required this.selectedDate,
+    required this.onDateSelected,
   });
 
   @override
-  State<FlightTrackingPage> createState() => _FlightTrackingPageState();
+  State<_DatePickerBottomSheet> createState() => _DatePickerBottomSheetState();
 }
 
-class _FlightTrackingPageState extends State<FlightTrackingPage> {
-  final CiriumApiService _ciriumService = CiriumApiService();
-  GoogleMapController? _mapController;
-  final ScrollController _scrollController = ScrollController();
-  
-  bool _isLoading = false;  // Start with false to show page instantly with existing data
-  FlightStatus? _flightStatus;
-  Appendix? _statusAppendix;
-  double _scrollOffset = 0;
-
-  // Colors from Figma - exact values
-  static const Color _accentGreen = Color(0xFF34C759);
-  static const Color _backgroundLight = Color(0xFFF1F5EB);
-  static const Color _cardWhite = Color(0xFFFDFFFA);
-  static const Color _flightBadgeBlue = Color(0xFF15357E);
-  static const Color _flightBadgeTextBlue = Color(0xFFDCFBFF);
-  static const Color _terminalRed = Color(0xFFFF383C);
-  static const Color _gateOrange = Color(0xFFF14D00); // Primary/Scapia/400
-  static const Color _beltNavy = Color(0xFF202269);
-  static const Color _arrivalTimeBg = Color(0xFFE7EBD9);
-  static const Color _aircraftBg = Color(0xFFFDFFFA); // Same as cardWhite
-  static const Color _delayedYellow = Color(0xFFD9C700); // Yellow-green for delayed state
+class _DatePickerBottomSheetState extends State<_DatePickerBottomSheet> {
+  late DateTime _tempSelectedDate;
 
   @override
   void initState() {
     super.initState();
-    _fetchFlightStatus();
-    _scrollController.addListener(_onScroll);
-  }
-
-  void _onScroll() {
-    setState(() {
-      _scrollOffset = _scrollController.offset;
-    });
-  }
-
-  Future<void> _fetchFlightStatus() async {
-    // Don't set loading state - page shows instantly with existing data
-    // API updates will refresh components in place
-
-    try {
-      final departureDate = widget.flight.departureDateTime;
-      if (departureDate == null) {
-        setState(() {
-          _isLoading = false;
-        });
-        debugPrint('[Airtime] Invalid departure date');
-        return;
-      }
-
-      debugPrint('[Airtime] Fetching flight status for ${widget.flight.fullFlightNumber}');
-      
-      final response = await _ciriumService.getFlightStatusByFlightNumber(
-        flight: widget.flight.fullFlightNumber,
-        year: departureDate.year,
-        month: departureDate.month,
-        day: departureDate.day,
-      );
-
-      if (!mounted) return;
-      
-      if (response.hasError) {
-        debugPrint('[Airtime] Flight status error: ${response.error?.errorMessage}');
-        // Fall back to schedule data if status not available
-        setState(() {
-          _flightStatus = null;
-          _statusAppendix = widget.appendix;
-          _isLoading = false;
-        });
-      } else if (response.flightStatuses.isEmpty) {
-        debugPrint('[Airtime] No flight status found, using schedule data');
-        setState(() {
-          _flightStatus = null;
-          _statusAppendix = widget.appendix;
-          _isLoading = false;
-        });
-      } else {
-        debugPrint('[Airtime] Flight status found');
-        final status = response.flightStatuses.first;
-        debugPrint('[Airtime] Flight status details:');
-        debugPrint('  - operationalTimes: ${status.operationalTimes}');
-        debugPrint('  - scheduledGateDeparture: ${status.operationalTimes?.scheduledGateDeparture?.localDateTime}');
-        debugPrint('  - publishedDeparture: ${status.operationalTimes?.publishedDeparture?.localDateTime}');
-        debugPrint('  - departureDate: ${status.departureDate?.localDateTime}');
-        debugPrint('  - Schedule departureDateTime: ${widget.flight.departureDateTime}');
-        
-        setState(() {
-          _flightStatus = status;
-          _statusAppendix = response.appendix ?? widget.appendix;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      debugPrint('[Airtime] Error fetching flight status: $e');
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-      });
-    }
-  }
-
-  String _getDestinationCity() {
-    final appendix = _statusAppendix ?? widget.appendix;
-    return appendix?.getAirport(widget.flight.arrivalAirportFsCode)?.city ?? widget.flight.arrivalAirportFsCode;
-  }
-
-  String _getDepartureAirportName() {
-    final appendix = _statusAppendix ?? widget.appendix;
-    return appendix?.getAirport(widget.flight.departureAirportFsCode)?.name ?? widget.flight.departureAirportFsCode;
-  }
-
-  String _getArrivalAirportName() {
-    final appendix = _statusAppendix ?? widget.appendix;
-    return appendix?.getAirport(widget.flight.arrivalAirportFsCode)?.name ?? widget.flight.arrivalAirportFsCode;
-  }
-
-  LatLng _getDestinationLatLng() {
-    final appendix = _statusAppendix ?? widget.appendix;
-    final airport = appendix?.getAirport(widget.flight.arrivalAirportFsCode);
-    if (airport != null) {
-      return LatLng(airport.latitude, airport.longitude);
-    }
-    return const LatLng(-33.8688, 18.7029); // Default
-  }
-
-  String _formatTime(DateTime? dateTime) {
-    if (dateTime == null) return '--:--';
-    final hour = dateTime.hour.toString().padLeft(2, '0');
-    final minute = dateTime.minute.toString().padLeft(2, '0');
-    return '$hour:$minute';
-  }
-
-  String _formatDate(DateTime? dateTime) {
-    if (dateTime == null) return '';
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 
-                    'July', 'August', 'September', 'October', 'November', 'December'];
-    return '${dateTime.day} ${months[dateTime.month - 1]}';
-  }
-
-  // Get departure time - prefer real-time status, fallback to schedule
-  DateTime? get _departureTime {
-    if (_flightStatus != null) {
-      // Try to get time from flight status operational times
-      final scheduledGate = _flightStatus!.operationalTimes?.scheduledGateDeparture?.localDateTime;
-      final published = _flightStatus!.operationalTimes?.publishedDeparture?.localDateTime;
-
-      // If we have operational times with actual time, use them
-      if (scheduledGate != null) return scheduledGate;
-      if (published != null) return published;
-
-      // Don't use departureDate as it typically only contains the date, not time
-      // Fall through to use schedule data instead
-    }
-
-    // Use schedule departure time (always has the actual time)
-    return widget.flight.departureDateTime;
-  }
-
-  // Get arrival time - prefer real-time status, fallback to schedule
-  DateTime? get _arrivalTime {
-    if (_flightStatus != null) {
-      return _flightStatus!.operationalTimes?.scheduledGateArrival?.localDateTime ??
-             _flightStatus!.operationalTimes?.publishedArrival?.localDateTime ??
-             _flightStatus!.arrivalDate?.localDateTime;
-    }
-    return widget.flight.arrivalDateTime;
-  }
-
-  // Get terminal info from flight status
-  String? get _departureTerminal {
-    return _flightStatus?.airportResources?.departureTerminal ?? widget.flight.departureTerminal;
-  }
-
-  String? get _arrivalTerminal {
-    return _flightStatus?.airportResources?.arrivalTerminal ?? widget.flight.arrivalTerminal;
-  }
-
-  String? get _departureGate {
-    return _flightStatus?.airportResources?.departureGate;
-  }
-
-  String? get _arrivalGate {
-    return _flightStatus?.airportResources?.arrivalGate;
-  }
-
-  String? get _arrivalBaggage {
-    return _flightStatus?.airportResources?.baggage;
-  }
-
-  bool get _isOnTime {
-    if (_flightStatus == null) return true;
-    return !(_flightStatus!.delays?.hasDepartureDelay ?? false);
-  }
-
-  // Get equipment info
-  String? get _aircraftName {
-    if (_flightStatus?.flightEquipment?.scheduledEquipmentIataCode != null) {
-      final appendix = _statusAppendix ?? widget.appendix;
-      final equipment = appendix?.getEquipment(_flightStatus!.flightEquipment!.scheduledEquipmentIataCode!);
-      return equipment?.name;
-    }
-    if (widget.flight.flightEquipmentIataCode != null) {
-      final appendix = _statusAppendix ?? widget.appendix;
-      final equipment = appendix?.getEquipment(widget.flight.flightEquipmentIataCode!);
-      return equipment?.name;
-    }
-    return null;
-  }
-
-  String? get _aircraftCode {
-    return _flightStatus?.flightEquipment?.scheduledEquipmentIataCode ?? 
-           widget.flight.flightEquipmentIataCode;
-  }
-
-  @override
-  void dispose() {
-    _mapController?.dispose();
-    _scrollController.removeListener(_onScroll);
-    _scrollController.dispose();
-    _ciriumService.dispose();
-    super.dispose();
+    _tempSelectedDate = widget.selectedDate;
   }
 
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final statusBarHeight = MediaQuery.of(context).padding.top;
-    
-    // Calculate floating elements position based on scroll
-    // Initial positions from Figma
-    const double initialBadgeTop = 244.0;
-    const double initialCardTop = 281.0;
-    const double mapHeight = 386.0;
-    
-    // When scrolled, badge and card should move up but stay visible
-    // In scrolled state: badge is at top (after status bar), card follows
-    final double scrolledBadgeTop = statusBarHeight + 16;
-    final double scrolledCardTop = statusBarHeight + 80; // Below badge
-    
-    // Calculate current position based on scroll
-    final double badgeTop = initialBadgeTop - (_scrollOffset * 0.8).clamp(0, initialBadgeTop - scrolledBadgeTop);
-    final double cardTop = initialCardTop - (_scrollOffset * 0.8).clamp(0, initialCardTop - scrolledCardTop);
-    
-    // Back button visibility: show standalone when not scrolled, hide when scrolled (integrated into badge)
-    final bool showStandaloneBackButton = _scrollOffset < 100;
-    final bool showIntegratedBackButton = _scrollOffset >= 100;
-    
-    return Scaffold(
-      body: Container(
-        color: _backgroundLight,
-        child: Stack(
-                children: [
-                  // LAYER 1: Scrollable content
-                  SingleChildScrollView(
-                    controller: _scrollController,
-                    child: Column(
-                    children: [
-                      // Map at top
-              SizedBox(
-                          height: mapHeight,
-                        width: screenWidth,
-                        child: GoogleMap(
-                          initialCameraPosition: CameraPosition(
-                            target: _getDestinationLatLng(),
-                            zoom: 10.0,
-                          ),
-                          onMapCreated: (controller) {
-                            _mapController = controller;
-                          },
-                          cloudMapId: '62f0e28a3bd3ee4c493ea929',
-                          zoomControlsEnabled: false,
-                          myLocationButtonEnabled: false,
-                          compassEnabled: false,
-                          mapToolbarEnabled: false,
-                        ),
-                      ),
-                      
-                        // Departure info section (starts right after map)
-                        _buildDepartureSection(screenWidth),
-                        
-                        // 17px spacing between containers
-                        const SizedBox(height: 17),
-                        
-                        // Arrival info section
-                        _buildArrivalSection(screenWidth),
-                        
-                        // 17px spacing between containers
-                        if (_aircraftName != null || _aircraftCode != null)
-                          const SizedBox(height: 17),
-                        
-                        // Aircraft info section
-                        if (_aircraftName != null || _aircraftCode != null)
-                          _buildAircraftSection(screenWidth),
-                        
-                        // Bottom padding + home indicator space
-                        SizedBox(height: 34 + MediaQuery.of(context).padding.bottom),
-                      ],
-                    ),
-                  ),
-                  
-                  // LAYER 2: Floating journey info card (behind flight badge)
-                  Positioned(
-                    left: 7,
-                    top: cardTop,
-                    child: Container(
-                      width: 376,
-                      height: 138,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(23),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.17),
-                            blurRadius: 84,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          // Destination
-                          Positioned(
-                            left: 17,
-                            top: 38,
-                            child: Text(
-                              'To  ${_getDestinationCity()}',
-                              style: GoogleFonts.balooBhai2(
-                                fontSize: 29,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.black,
-                                height: 45 / 29,
-                              ),
-                            ),
-                          ),
-                          // Date
-                          Positioned(
-                            left: 17,
-                            bottom: 23,
-                            child: Text(
-                              _formatDate(_departureTime),
-                              style: GoogleFonts.balooBhai2(
-                                fontSize: 23,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.black.withValues(alpha: 0.6),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  
-                  // LAYER 3: Floating flight badge (always on top - highest z-index)
-                  Positioned(
-                    left: showIntegratedBackButton ? 24 : 24,
-                    top: badgeTop,
-                    child: GestureDetector(
-                      onTap: showIntegratedBackButton ? () => Navigator.pop(context) : null,
-                      child: Container(
-                        padding: EdgeInsets.only(
-                          left: showIntegratedBackButton ? 13 : 13,
-                          right: 13,
-                          top: 7,
-                          bottom: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _flightBadgeBlue,
-                          borderRadius: BorderRadius.circular(17),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Integrated back button when scrolled
-                            if (showIntegratedBackButton) ...[
-                              Container(
-                                width: 40,
-                                height: 40,
-                                decoration: const BoxDecoration(
-                                  color: Colors.white,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Center(
-                                  child: Icon(
-                                    CupertinoIcons.chevron_left,
-                                    size: 20,
-                                    color: Colors.black,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                            Text(
-                              widget.flight.fullFlightNumber,
-                              style: GoogleFonts.balooBhai2(
-                                fontSize: 37,
-                                fontWeight: FontWeight.w800,
-                                color: _flightBadgeTextBlue,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                      
-                  // LAYER 4: Standalone back button (only when not scrolled)
-                  if (showStandaloneBackButton)
-                      Positioned(
-                      left: 16,
-                      top: 60,
-                      child: GestureDetector(
-                        onTap: () => Navigator.pop(context),
-                        child: Container(
-                          width: 48,
-                          height: 48,
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Center(
-                            child: Icon(
-                              CupertinoIcons.chevron_left,
-                              size: 23,
-                              color: Colors.black,
-                            ),
-                        ),
-                        ),
-                  ),
-          ),
-                ],
+    final scale = screenWidth / 390.0;
+    final bottomPadding = MediaQuery.of(context).padding.bottom;
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(20),
+          topRight: Radius.circular(20),
         ),
       ),
-    );
-  }
-
-  Widget _buildDepartureSection(double screenWidth) {
-    // Figma: height 192px
-    return Container(
-      width: screenWidth,
-      height: 192,
-      color: _cardWhite,
-      child: Stack(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // "Departure" title - Figma: left calc(50%-178px), bottom 130px (from bottom)
-          Positioned(
-            left: 17,
-            top: 29,
-            child: Text(
-              'Departure',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 25,
-                fontWeight: FontWeight.w700,
-                color: Colors.black,
-                height: 33 / 25,
-              ),
+          // Handle bar
+          Container(
+            margin: EdgeInsets.only(top: 12 * scale),
+            width: 36 * scale,
+            height: 5 * scale,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(2.5 * scale),
             ),
           ),
-          // Airport name - Figma: left calc(50%-178px), bottom 96px (from bottom)
-          Positioned(
-            left: 17,
-            top: 63,
-            child: SizedBox(
-              width: 217,
-              child: Text(
-                _getDepartureAirportName(),
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
-                  height: 23 / 17,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+
+          // Header
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: 19 * scale,
+              vertical: 16 * scale,
             ),
-          ),
-          // Time box with green/yellow border - Figma: right 13px, top 17px
-          // Contains both time and status label ("On Time" or "delayed") together
-          Positioned(
-            right: 13,
-            top: 17,
-            child: IntrinsicWidth(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(13),
-                  border: Border.all(
-                    color: _isOnTime ? _accentGreen : _delayedYellow,
-                    width: 4,
-                  ),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // Time text
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                      child: Text(
-                        _formatTime(_departureTime),
-                        style: GoogleFonts.balooBhai2(
-                          fontSize: 31,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.black,
-                          letterSpacing: 2.17,
-                          height: 43 / 31,
-                        ),
-                      ),
-                    ),
-                    // Status badge ("On Time" or "delayed") inside the same container
-                    Container(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      decoration: BoxDecoration(
-                        color: _isOnTime ? _accentGreen : _delayedYellow,
-                        borderRadius: const BorderRadius.only(
-                          bottomLeft: Radius.circular(9),
-                          bottomRight: Radius.circular(9),
-                        ),
-                      ),
-                      child: Center(
-                        child: Text(
-                          _isOnTime ? 'On Time' : 'delayed',
-                          style: GoogleFonts.balooBhai2(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
-                            color: _cardWhite,
-                            height: 23 / 17,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // Terminal badge - Figma: left 17px, top 136px
-          if (_departureTerminal != null)
-            Positioned(
-              left: 17,
-              bottom: 23,
-              child: Container(
-                width: 48,
-                height: 33,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(100),
-                  border: Border.all(color: _terminalRed, width: 4),
-                ),
-                child: Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.pop(context),
                   child: Text(
-                    'T${_departureTerminal!}',
+                    'Cancel',
                     style: GoogleFonts.balooBhai2(
-                      fontSize: 23,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
-                      height: 31 / 23,
+                      fontSize: 17 * scale,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF006ECF),
+                      height: 23 / 17,
                     ),
                   ),
                 ),
-              ),
-            ),
-          // Gate badge - Figma: left 71px, bg #F14D00 (orange)
-          if (_departureGate != null)
-            Positioned(
-              left: _departureTerminal != null ? 71 : 17,
-              bottom: 23,
-              child: Container(
-                height: 33,
-                padding: const EdgeInsets.only(left: 8, right: 12),
-                decoration: BoxDecoration(
-                  color: _gateOrange,
-                  borderRadius: BorderRadius.circular(100),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      CupertinoIcons.arrow_turn_up_right,
-                      size: 19,
-                      color: Color(0xFFFFDDDC),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Gate $_departureGate',
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 23,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFFFFDDDC),
-                        height: 31 / 23,
-                      ),
-                    ),
-                  ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildArrivalSection(double screenWidth) {
-    // Figma: height 176px
-    // Calculate gate badge position based on terminal presence
-    double gateBadgeLeft = 17;
-    if (_arrivalTerminal != null) gateBadgeLeft = 71;
-    
-    return Container(
-      width: screenWidth,
-      height: 176,
-      color: _cardWhite,
-      child: Stack(
-        children: [
-          // "Arrival" title - Figma: left calc(50%-178px), bottom 153px
-          Positioned(
-            left: 17,
-            top: 13,
-            child: Text(
-              'Arrival',
-              style: GoogleFonts.balooBhai2(
-                fontSize: 25,
-                fontWeight: FontWeight.w700,
-                color: Colors.black,
-                height: 33 / 25,
-              ),
-            ),
-          ),
-          // Airport name - Figma: left calc(50%-178px), bottom 119px, width 217px
-          Positioned(
-            left: 17,
-            top: 47,
-            child: SizedBox(
-              width: 217,
-              child: Text(
-                _getArrivalAirportName(),
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
-                  height: 23 / 17,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-          // Time box (gray background) - Figma: right 13px, bottom 107px
-          Positioned(
-            right: 13,
-            top: 17,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: _arrivalTimeBg,
-                borderRadius: BorderRadius.circular(13),
-              ),
-                child: Text(
-                  _formatTime(_arrivalTime),
+                Text(
+                  'Select Date',
                   style: GoogleFonts.balooBhai2(
-                    fontSize: 31,
-                  fontWeight: FontWeight.w700,
+                    fontSize: 19 * scale,
+                    fontWeight: FontWeight.w600,
                     color: Colors.black,
-                    letterSpacing: 2.17,
-                  height: 43 / 31,
+                    height: 25 / 19,
                   ),
                 ),
-              ),
-            ),
-          // Terminal badge - Figma: left 17px, top 120px
-          if (_arrivalTerminal != null)
-            Positioned(
-              left: 17,
-              bottom: 23,
-              child: Container(
-                width: 48,
-                height: 33,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(100),
-                  border: Border.all(color: _terminalRed, width: 4),
-                ),
-                child: Center(
+                GestureDetector(
+                  onTap: () => widget.onDateSelected(_tempSelectedDate),
                   child: Text(
-                    'T${_arrivalTerminal!}',
+                    'Done',
                     style: GoogleFonts.balooBhai2(
-                      fontSize: 23,
+                      fontSize: 17 * scale,
                       fontWeight: FontWeight.w600,
-                      color: Colors.black,
-                      height: 31 / 23,
+                      color: const Color(0xFF006ECF),
+                      height: 23 / 17,
                     ),
                   ),
                 ),
-              ),
-            ),
-          // Gate badge - Figma: left 71px, bg #F14D00 (orange)
-          if (_arrivalGate != null)
-            Positioned(
-              left: gateBadgeLeft,
-              bottom: 23,
-              child: Container(
-                height: 33,
-                padding: const EdgeInsets.only(left: 8, right: 12),
-                decoration: BoxDecoration(
-                  color: _gateOrange,
-                  borderRadius: BorderRadius.circular(100),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      CupertinoIcons.arrow_turn_up_right,
-                      size: 19,
-                      color: Color(0xFFFFDDDC),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Gate $_arrivalGate',
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 23,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFFFFDDDC),
-                        height: 31 / 23,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          // Belt badge - Figma: left 203px, bg #202269 (navy)
-          if (_arrivalBaggage != null)
-            Positioned(
-              left: 203,
-              bottom: 23,
-              child: Container(
-                height: 33,
-                padding: const EdgeInsets.only(left: 8, right: 12),
-                decoration: BoxDecoration(
-                  color: _beltNavy,
-                  borderRadius: BorderRadius.circular(100),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      CupertinoIcons.bag,
-                      size: 19,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Belt $_arrivalBaggage',
-                      style: GoogleFonts.balooBhai2(
-                        fontSize: 23,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                        height: 31 / 23,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAircraftSection(double screenWidth) {
-    // Parse aircraft name (e.g., "Boeing 787-9 Dreamliner")
-    // Figma shows: "Boeing 787" as title, "Dreamliner" as subtitle
-    String displayName = 'Boeing 787';
-    String? subtitle = 'Dreamliner';
-    
-    if (_aircraftName != null) {
-      // Try to parse the aircraft name
-      final parts = _aircraftName!.split(' ');
-      if (parts.length >= 2) {
-        // e.g., "Boeing 787-9 Dreamliner" -> "Boeing 787" + "Dreamliner"
-        displayName = '${parts[0]} ${parts[1]}';
-        if (parts.length > 2) {
-          subtitle = parts.sublist(2).join(' ');
-    }
-      } else {
-        displayName = _aircraftName!;
-        subtitle = null;
-      }
-    }
-    
-    // Figma: height 93px, bg #FDFFFA (off-white)
-    return Container(
-      width: screenWidth,
-      height: 93,
-      color: _aircraftBg, // Now #FDFFFA
-      child: Stack(
-        children: [
-          // Aircraft name - Figma: left 16px, top 17px
-          Positioned(
-            left: 16,
-            top: 17,
-            child: Text(
-              displayName,
-              style: GoogleFonts.balooBhai2(
-                fontSize: 25,
-                fontWeight: FontWeight.w700,
-                color: Colors.black,
-                height: 33 / 25,
-              ),
+              ],
             ),
           ),
-          // Subtitle (e.g., "Dreamliner") - Figma: left calc(50%-179px), top 53px
-          if (subtitle != null)
-            Positioned(
-              left: 16,
-              top: 53,
-              child: Text(
-                subtitle,
-                style: GoogleFonts.balooBhai2(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.black,
-                  height: 23 / 17,
-                ),
-              ),
+
+          // Divider
+          Container(
+            height: 1,
+            color: Colors.black.withValues(alpha: 0.1),
+          ),
+
+          // Date picker
+          SizedBox(
+            height: 216 * scale,
+            child: CupertinoDatePicker(
+              mode: CupertinoDatePickerMode.date,
+              initialDateTime: _tempSelectedDate,
+              minimumDate: DateTime.now().subtract(const Duration(days: 1)),
+              maximumDate: DateTime.now().add(const Duration(days: 365)),
+              onDateTimeChanged: (DateTime date) {
+                setState(() {
+                  _tempSelectedDate = date;
+                });
+              },
             ),
+          ),
+
+          SizedBox(height: bottomPadding + 16 * scale),
         ],
       ),
     );
