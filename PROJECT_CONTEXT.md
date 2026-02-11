@@ -39,6 +39,7 @@ Airtime is a **Flutter-based travel tracking application** that:
 │       ├── auth_service.dart         # Firebase Auth, Google Sign-In, flight CRUD, anonymous→Google migration
 │       ├── cirium_api_service.dart   # Cirium FlightStats + Schedules API client
 │       ├── notification_service.dart # FCM + local notifications
+│       ├── flight_tracking_foreground_service.dart  # Android foreground service + custom RemoteViews notifications
 │       ├── travel_service.dart       # Gmail travel extraction via Firebase Functions
 │       └── services.dart             # Barrel export
 ├── functions/                        # Firebase Cloud Functions (Node.js/TypeScript)
@@ -77,7 +78,21 @@ Airtime is a **Flutter-based travel tracking application** that:
 │   │   └── ntes_scraper.py          # HTTP scrapers for erail.in, indiarailinfo.com, NTES
 │   ├── requirements.txt             # fastapi, uvicorn, selenium, beautifulsoup4, httpx, pydantic
 │   └── Dockerfile                   # Python 3.11-slim + Chromium for headless browser
-├── android/, ios/, web/, linux/, macos/, windows/  # Platform-specific code
+├── android/
+│   └── app/src/main/
+│       ├── kotlin/com/example/airtime/
+│       │   ├── MainActivity.kt               # MethodChannel for flight notifications
+│       │   └── FlightNotificationHelper.kt   # Custom RemoteViews notification builder
+│       └── res/
+│           ├── layout/
+│           │   ├── notification_flight_collapsed.xml  # Collapsed: flight path + airplane + status
+│           │   └── notification_flight_expanded.xml   # Expanded: full flight tracker view
+│           └── drawable/
+│               ├── notification_flight_path.xml       # Thin green progress line
+│               ├── notification_dot_green.xml         # Green endpoint dots
+│               ├── notification_progress_bar.xml      # Standard green progress bar
+│               └── ic_flight_progress.xml             # Airplane vector icon
+├── ios/, web/, linux/, macos/, windows/  # Platform-specific code
 ├── assets/                           # Image assets
 ├── pubspec.yaml                      # Flutter deps
 ├── firebase.json                     # Firebase config
@@ -102,6 +117,7 @@ Airtime is a **Flutter-based travel tracking application** that:
 | **Flight Data** | Cirium FlightStats API | REST API v2 |
 | **Push Notifications** | Firebase Cloud Messaging | firebase_messaging ^15.1.6 |
 | **Maps** | Google Maps Flutter | google_maps_flutter ^2.6.1 |
+| **Live Flight Notifications** | Android Custom RemoteViews + MethodChannel | Native Kotlin + DecoratedCustomViewStyle |
 | **Train Data** | Custom Python scraper on Cloud Run | FastAPI + Selenium + BeautifulSoup |
 | **PDF Parsing** | pdf-parse (Node.js) | ^1.1.1 |
 | **Email** | Gmail API via googleapis | ^140.0.0 |
@@ -453,7 +469,33 @@ Singleton. Android channel: `flight_status` (high importance).
 | `_storeToken(token)` | Store FCM token in Firestore `users/{uid}.fcmTokens` |
 | `cleanup()` | Remove FCM token from Firestore on sign out |
 
-### 9.4 TravelService (`lib/services/travel_service.dart`)
+### 9.4 FlightTrackingForegroundService (`lib/services/flight_tracking_foreground_service.dart`)
+
+Singleton. Android-only. Manages persistent foreground service + custom RemoteViews notifications for live flight tracking.
+
+**Notification Channels:**
+- `flight_tracking_service` (LOW importance) — foreground service keepalive
+- `flight_tracking_live` (LOW importance) — per-flight custom notifications
+
+**Key Classes:**
+- `FlightTrackingData` — DTO passed from `main.dart` (firestoreId, flightNumber, originCity, destinationCity, departureDateTime, arrivalDateTime, departureTerminal, arrivalTerminal, gate)
+- `_TrackedFlight` — internal mutable state (status, gate, delayMinutes, diversionAirport, baggageBelt)
+- `_FlightTrackingTaskHandler` — top-level foreground task callback (no-op, updates via FCM)
+
+**Key Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `init()` | Configure foreground task, create notification channel, start FCM listener |
+| `evaluateFlights(flights)` | Filter flights eligible for tracking (departed or departing within 24h), start service |
+| `_showFlightNotification(id)` | Compute phase (pre-departure/in-flight/landed/cancelled/diverted), invoke MethodChannel |
+| `_handleFcmMessage(msg)` | Update tracked flight state from FCM event, re-render notification |
+| `_stopTrackingFlight(id)` | Cancel notification, remove from map, stop service if empty |
+| `_scheduleRemoval(id)` | Auto-remove 30 min after landing |
+
+**MethodChannel:** `com.example.airtime/flight_notification` — communicates with native `FlightNotificationHelper.kt` for custom RemoteViews rendering. See Section 13.5 for full architecture details.
+
+### 9.5 TravelService (`lib/services/travel_service.dart`)
 
 | Method | Purpose |
 |--------|---------|
@@ -618,13 +660,13 @@ Cirium POSTs to ciriumAlertWebhook
 
 ## 13. NOTIFICATION SYSTEM
 
-### FCM Channel
+### FCM Channel (Push Notifications)
 - **Channel ID:** `flight_status`
 - **Channel Name:** `Flight Status`
 - **Importance:** High
 - **Platform configs:** Android (high priority, channelId) + iOS (default sound, badge=1)
 
-### Notification Types
+### FCM Notification Types
 
 | Event | Title | Body Example |
 |-------|-------|-------------|
@@ -641,6 +683,180 @@ Cirium POSTs to ciriumAlertWebhook
 - Tokens stored in `users/{uid}.fcmTokens` array
 - Invalid tokens auto-cleaned on send failure
 - Token refresh handled via `onTokenRefresh` listener
+
+---
+
+## 13.5. ANDROID LIVE FLIGHT TRACKING (Custom RemoteViews Notifications)
+
+Android-only persistent notifications that display real-time flight status using custom RemoteViews layouts, similar to iOS Live Activities. Bypasses `flutter_local_notifications` for the tracking notification to enable full control over layout, colors, and progress bar styling.
+
+### Architecture Overview
+
+```
+Flutter (Dart)                         Android (Kotlin)
+┌──────────────────────────┐           ┌──────────────────────────────┐
+│ FlightTrackingForeground │           │ MainActivity                 │
+│ Service                  │──────────▶│   MethodChannel handler      │
+│                          │ invoke    │   ↓                          │
+│ _showFlightNotification()│ Method    │ FlightNotificationHelper     │
+│ _channel.invokeMethod()  │ Channel   │   .show(params)              │
+│                          │           │   .cancel(id)                │
+│ Phase logic (Dart-side): │           │   ↓                          │
+│ - Pre-departure          │           │ NotificationCompat.Builder   │
+│ - In Flight              │           │   + DecoratedCustomViewStyle │
+│ - Landed                 │           │   + collapsed RemoteViews    │
+│ - Cancelled              │           │   + expanded RemoteViews     │
+│ - Diverted               │           └──────────────────────────────┘
+└──────────────────────────┘
+```
+
+**MethodChannel:** `com.example.airtime/flight_notification`
+- `showFlightNotification` — receives Map of params, delegates to `FlightNotificationHelper.show()`
+- `cancelFlightNotification` — cancels notification by ID
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `android/.../kotlin/.../MainActivity.kt` | MethodChannel setup, routes calls to helper |
+| `android/.../kotlin/.../FlightNotificationHelper.kt` | Builds collapsed + expanded RemoteViews, shows notification via `NotificationManagerCompat` |
+| `android/.../res/layout/notification_flight_collapsed.xml` | Collapsed view: flight path with city names, green dots, progress bar, airplane icon, status, subtitle |
+| `android/.../res/layout/notification_flight_expanded.xml` | Expanded view: flight number, departure/arrival times+cities, flight path, status, time remaining, details |
+| `android/.../res/drawable/notification_flight_path.xml` | Thin line progress drawable (green `#4CAF50` fill, semi-transparent background) |
+| `android/.../res/drawable/notification_dot_green.xml` | Green circle (8dp) for flight path endpoints |
+| `android/.../res/drawable/ic_flight_progress.xml` | Airplane vector icon (18dp, dark `#424242`, rotated 90° to point right) |
+| `android/.../res/drawable/notification_progress_bar.xml` | Original green progress bar drawable (legacy, kept for reference) |
+| `lib/services/flight_tracking_foreground_service.dart` | Dart-side service: phase logic, MethodChannel calls, FCM state updates |
+
+### Notification Channels (Android)
+
+| Channel ID | Name | Importance | Purpose |
+|------------|------|------------|---------|
+| `flight_tracking_service` | Flight Tracking Service | LOW | Foreground service keepalive (managed by `flutter_foreground_task`) |
+| `flight_tracking_live` | Live Flight Tracking | LOW | Per-flight custom RemoteViews notifications |
+
+### Collapsed View Design
+
+```
+┌────────────────────────────────────────────┐
+│  Dubai  ●━━━━━━━━━━✈╌╌╌╌╌╌╌╌●  London    │
+│  In Flight                                 │
+│  Arriving 3:30 PM                          │
+└────────────────────────────────────────────┘
+```
+
+- City names (bold, 15sp) on each side
+- Green dots (7dp) as flight path endpoints
+- `ProgressBar` with custom `notification_flight_path` drawable
+- Airplane icon (`ic_flight_progress`) overlaid at the progress point via `FrameLayout` + dynamic `setViewPadding`
+- Status text with color coding (green=on time, orange=delayed/diverted, red=cancelled)
+- Subtitle text (time info stripped of redundant route prefix)
+
+### Expanded View Design
+
+```
+┌────────────────────────────────────────────┐
+│  EK500                      3:30 PM London │
+│  Dubai  10:00 AM                           │
+│  ●━━━━━━━━━━✈╌╌╌╌╌╌╌╌●                    │
+│  In Flight                   2h 30m until  │
+│  Departed 10:00 AM · ETA: 3:30 PM         │
+└────────────────────────────────────────────┘
+```
+
+- Flight number header (left) + arrival time/city (right, bold)
+- Origin city + departure time
+- Flight path (same dots+progress+airplane pattern as collapsed)
+- Status (left, color-coded) + time remaining (right, computed from chronometerWhen)
+- Expanded detail text (gate, terminal, baggage info)
+
+### Airplane Icon Positioning
+
+The airplane icon is positioned dynamically at the progress percentage along the progress bar:
+
+```kotlin
+val dm = context.resources.displayMetrics
+val density = dm.density
+val screenWidthDp = dm.widthPixels / density
+// Estimate progress bar width by subtracting system chrome + city text padding
+val progressBarWidthPx = ((screenWidthDp - 210f) * density).toInt().coerceAtLeast(1) // collapsed
+val iconHalfPx = (9 * density).toInt()  // half of 18dp icon
+val paddingStartPx = ((progressBarWidthPx * progress / 100f) - iconHalfPx).toInt().coerceAtLeast(0)
+collapsed.setViewPadding(R.id.flight_icon_container, paddingStartPx, 0, 0, 0)
+```
+
+### Phase Logic (Dart-side, in `_showFlightNotification`)
+
+| Phase | Condition | Title | Progress | Chronometer |
+|-------|-----------|-------|----------|-------------|
+| **Pre-departure** | `!departed && status != cancelled/diverted` | `EK500 — On Time` or `EK500 — Delayed 15m` | 0% | Countdown to departure |
+| **In Flight** | `departed && !landed` | `EK500 — In Flight` | `(elapsed / total) * 100` | Countdown to arrival |
+| **Landed** | `landed` or `status == 'landed'` | `EK500 — Landed` | 100% | None |
+| **Cancelled** | `status == 'cancelled'` | `EK500 — Cancelled` | 0% | None |
+| **Diverted** | `status == 'diverted'` | `EK500 — Diverted` | 50% | None |
+
+### Status Color Coding (Kotlin-side)
+
+```kotlin
+val statusColor = when {
+    status.startsWith("Delayed") -> 0xFFFF9800.toInt()  // Orange
+    status == "Cancelled" -> 0xFFF44336.toInt()          // Red
+    status.startsWith("Diverted") -> 0xFFFF9800.toInt()  // Orange
+    else -> 0xFF4CAF50.toInt()                            // Green
+}
+```
+
+### FCM → Notification State Updates
+
+When FCM messages arrive (via `_handleFcmMessage`), the tracked flight's mutable state is updated and the notification is re-rendered:
+
+| FCM Event | State Change |
+|-----------|-------------|
+| `DELAY` / `DEPARTURE_DELAY` | `tracked.delayMinutes = ...` |
+| `GATE_CHANGE` / `GATE_DEPARTURE` | `tracked.gate = ...` |
+| `DEPARTURE` | `tracked.status = 'departed'` |
+| `ARRIVAL` | `tracked.status = 'landed'` + schedule removal in 30min |
+| `CANCELLATION` | `tracked.status = 'cancelled'` |
+| `DIVERSION` | `tracked.status = 'diverted'` + `tracked.diversionAirport = ...` |
+| `BAGGAGE` | `tracked.baggageBelt = ...` |
+
+### Flight Tracking Eligibility
+
+Flights are auto-tracked when:
+- Already departed AND (no arrival time OR arrived < 30 min ago)
+- Departing within the next 24 hours
+
+Auto-removed:
+- 30 minutes after landing (`_scheduleRemoval`)
+- Foreground service stops when no flights remain
+
+### Params Passed via MethodChannel
+
+```dart
+await _channel.invokeMethod('showFlightNotification', {
+  'notificationId': tracked.notificationId,     // int (hash of Firestore ID)
+  'title': title,                                // "EK500 — In Flight"
+  'contentLine': contentLine,                    // "Dubai → London · Arriving 3:30 PM"
+  'expandedText': expandedText,                  // "Departed 10:00 AM · ETA: 3:30 PM"
+  'route': route,                                // "Dubai → London"
+  'progress': progress,                          // 0-100
+  'useChronometer': useChronometer,              // bool
+  'chronometerWhen': chronometerWhen,            // epoch millis
+  'countDown': countDown,                        // bool (always true)
+  'originCity': tracked.originCity,              // "Dubai"
+  'destinationCity': tracked.destinationCity,    // "London"
+  'flightNumber': tracked.flightNumber,          // "EK500"
+  'departureTime': _formatTime(...),             // "10:00 AM"
+  'arrivalTime': _formatTime(...),               // "3:30 PM"
+});
+```
+
+### RemoteViews Constraints (Important)
+
+Android RemoteViews only supports a **limited set of views**:
+- **Allowed:** `LinearLayout`, `RelativeLayout`, `FrameLayout`, `GridLayout`, `TextView`, `ImageView`, `ProgressBar`, `Button`, `Chronometer`, `ViewFlipper`
+- **NOT allowed:** `View`, `ConstraintLayout`, `RecyclerView`, custom views, `CardView`
+- Spacers must use `<TextView>` with `layout_weight` instead of `<View>`
 
 ---
 
@@ -742,5 +958,5 @@ The full PRD defines **41+ distinct states** across two screens:
 
 ---
 
-*Last updated: 2026-02-07*
+*Last updated: 2026-02-11*
 *Auto-generated from full codebase analysis*

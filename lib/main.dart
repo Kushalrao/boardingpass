@@ -11,6 +11,7 @@ import 'package:google_maps_flutter_platform_interface/google_maps_flutter_platf
 import 'services/auth_service.dart';
 import 'services/cirium_api_service.dart';
 import 'services/notification_service.dart';
+import 'services/flight_tracking_foreground_service.dart';
 import 'models/schedule.dart';
 import 'models/flight_status.dart';
 import 'models/common.dart';
@@ -103,6 +104,8 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final AuthService _authService = AuthService();
   final CiriumApiService _ciriumService = CiriumApiService();
+  final FlightTrackingForegroundService _flightTrackingService =
+      FlightTrackingForegroundService();
   GoogleMapController? _mapController;
 
   // Trips state (combined flights and trains)
@@ -167,6 +170,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _initAnimations();
     _initAuthService();
     _searchController.addListener(_onSearchChanged);
+    _initFlightTracking();
   }
 
   // ==========================================================
@@ -284,6 +288,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
     // Load trips from Firestore
     await _loadTrips();
+
+    // Start live tracking notifications for eligible flights
+    _startFlightTrackingForTrips();
   }
 
   Future<void> _loadTrips() async {
@@ -455,6 +462,34 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
+  // ============================================================
+  // FLIGHT TRACKING FOREGROUND SERVICE (live notifications)
+  // ============================================================
+
+  Future<void> _initFlightTracking() async {
+    await _flightTrackingService.init();
+  }
+
+  void _startFlightTrackingForTrips() {
+    final flightData = _trips
+        .where((t) => t.type == TripType.flight && t.firestoreId != null)
+        .map((t) => FlightTrackingData(
+              firestoreId: t.firestoreId!,
+              flightNumber: t.flight?.fullFlightNumber ?? '',
+              originCity: t.originCity,
+              destinationCity: t.destinationCity,
+              departureDateTime: t.departureDateTime,
+              arrivalDateTime: t.arrivalDateTime,
+              departureTerminal: t.flight?.departureTerminal,
+              arrivalTerminal: t.flight?.arrivalTerminal,
+            ))
+        .toList();
+
+    if (flightData.isNotEmpty) {
+      _flightTrackingService.evaluateFlights(flightData);
+    }
+  }
+
   List<Trip> get _upcomingTrips => _trips.where((t) => t.isUpcoming).toList();
   List<Trip> get _previousTrips => _trips.where((t) => !t.isUpcoming).toList();
 
@@ -578,6 +613,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _flightTrackingAnimationController.dispose();
     _searchController.dispose();
     _searchFocusNode.dispose();
+    _flightTrackingService.dispose();
     super.dispose();
   }
 
