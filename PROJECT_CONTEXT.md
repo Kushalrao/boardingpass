@@ -39,7 +39,7 @@ Airtime is a **Flutter-based travel tracking application** that:
 │       ├── auth_service.dart         # Firebase Auth, Google Sign-In, flight CRUD, anonymous→Google migration
 │       ├── cirium_api_service.dart   # Cirium FlightStats + Schedules API client
 │       ├── notification_service.dart # FCM + local notifications
-│       ├── flight_tracking_foreground_service.dart  # Android foreground service + custom RemoteViews notifications
+│       ├── flight_tracking_foreground_service.dart  # Cross-platform: Android foreground service + iOS Live Activities
 │       ├── travel_service.dart       # Gmail travel extraction via Firebase Functions
 │       └── services.dart             # Barrel export
 ├── functions/                        # Firebase Cloud Functions (Node.js/TypeScript)
@@ -61,7 +61,10 @@ Airtime is a **Flutter-based travel tracking application** that:
 │   │   │   ├── ciriumWeatherService.ts       # Airport METAR/TAF weather
 │   │   │   ├── ciriumEquipmentService.ts     # Aircraft equipment info
 │   │   │   ├── ciriumAlertService.ts         # Flight alert subscriptions
-│   │   │   └── fcmService.ts                 # Firebase Cloud Messaging sender
+│   │   │   ├── fcmService.ts                 # Firebase Cloud Messaging sender
+│   │   │   └── apnsService.ts               # APNs HTTP/2 push for iOS Live Activities
+│   │   ├── liveActivity/
+│   │   │   └── index.ts              # onFlightAlertUpdated Firestore trigger → APNs push
 │   │   └── trains/
 │   │       ├── index.ts              # Train cloud functions (524 lines)
 │   │       ├── models/train.ts       # Train TypeScript interfaces
@@ -92,7 +95,15 @@ Airtime is a **Flutter-based travel tracking application** that:
 │               ├── notification_dot_green.xml         # Green endpoint dots
 │               ├── notification_progress_bar.xml      # Standard green progress bar
 │               └── ic_flight_progress.xml             # Airplane vector icon
-├── ios/, web/, linux/, macos/, windows/  # Platform-specific code
+├── ios/
+│   ├── Runner/
+│   │   ├── AppDelegate.swift             # Flutter config, Firebase, FCM + Live Activity MethodChannel
+│   │   ├── LiveActivityManager.swift     # ActivityKit lifecycle: start, update, end + push token observation
+│   │   └── Info.plist                    # NSSupportsLiveActivities = YES
+│   └── FlightTrackingWidget/            # Widget Extension target (iOS 16.1+)
+│       ├── FlightTrackingAttributes.swift # ActivityAttributes model (static + ContentState)
+│       └── FlightActivityWidget.swift    # SwiftUI views: Lock Screen, Dynamic Island (compact/expanded/minimal)
+├── web/, linux/, macos/, windows/        # Platform-specific code
 ├── assets/                           # Image assets
 ├── pubspec.yaml                      # Flutter deps
 ├── firebase.json                     # Firebase config
@@ -117,7 +128,8 @@ Airtime is a **Flutter-based travel tracking application** that:
 | **Flight Data** | Cirium FlightStats API | REST API v2 |
 | **Push Notifications** | Firebase Cloud Messaging | firebase_messaging ^15.1.6 |
 | **Maps** | Google Maps Flutter | google_maps_flutter ^2.6.1 |
-| **Live Flight Notifications** | Android Custom RemoteViews + MethodChannel | Native Kotlin + DecoratedCustomViewStyle |
+| **Live Flight Notifications (Android)** | Custom RemoteViews + MethodChannel | Native Kotlin + DecoratedCustomViewStyle |
+| **Live Flight Notifications (iOS)** | iOS Live Activities (ActivityKit + WidgetKit) | Native Swift + SwiftUI + APNs push tokens |
 | **Train Data** | Custom Python scraper on Cloud Run | FastAPI + Selenium + BeautifulSoup |
 | **PDF Parsing** | pdf-parse (Node.js) | ^1.1.1 |
 | **Email** | Gmail API via googleapis | ^140.0.0 |
@@ -138,6 +150,11 @@ Airtime is a **Flutter-based travel tracking application** that:
 | `CIRIUM_APP_KEY` | `b5da0595ab863d6421f5e66b73805e0b` - Cirium FlightStats API |
 | `CIRIUM_WEBHOOK_URL` | `https://us-central1-airtime-4e65f.cloudfunctions.net/ciriumAlertWebhook` |
 | `TRAIN_SCRAPER_URL` | Cloud Run URL for train scraper service |
+| `APNS_KEY_ID` | Apple APNs key ID (for Live Activity push) |
+| `APNS_TEAM_ID` | Apple Developer Team ID |
+| `APNS_BUNDLE_ID` | `com.example.airtime` — iOS app bundle ID |
+| `APNS_KEY_P8` | Base64-encoded .p8 APNs private key |
+| `APNS_SANDBOX` | `true` for sandbox, omit for production |
 
 **Flutter-side credentials (hardcoded in code):**
 - Cirium: In `lib/services/cirium_api_service.dart` (appId + appKey)
@@ -160,6 +177,12 @@ Airtime is a **Flutter-based travel tracking application** that:
 | `deleteFlightAlert` | Callable | Yes | Unsubscribe from Cirium alerts |
 | `onFlightCreated` | Firestore trigger | N/A | On new flight doc: fetch Cirium data (status, ratings, weather, equipment), create alert, send FCM |
 | `onFlightDeleted` | Firestore trigger | N/A | On flight deletion: delete associated Cirium alert |
+
+### Live Activity Functions (in `functions/src/liveActivity/index.ts`)
+
+| Function | Type | Auth | Purpose |
+|----------|------|------|---------|
+| `onFlightAlertUpdated` | Firestore trigger (onUpdate) | N/A | Watches `users/{userId}/flights/{flightId}` for `lastAlertType`/`lastAlertDetails` changes → sends APNs push to iOS Live Activity via `liveActivityPushToken` |
 
 ### Train Functions (in `functions/src/trains/index.ts`)
 
@@ -228,7 +251,8 @@ users/{userId}
 │   ├── alertCapabilities: {baggage, departureGateChange, arrivalGateChange, ...}
 │   ├── lastAlertType: string
 │   ├── lastAlertAt: Timestamp
-│   └── lastAlertDetails: {...}
+│   ├── lastAlertDetails: {...}
+│   └── liveActivityPushToken: string    # iOS Live Activity APNs push token (written by Dart, read by onFlightAlertUpdated)
 │
 ├── travels/{messageId}                # Subcollection (from Gmail extraction)
 │   ├── booking_type: "flight" | "hotel" | "train" | "bus" | "event" | "attraction" | "visa" | "vacation_rental"
@@ -471,29 +495,37 @@ Singleton. Android channel: `flight_status` (high importance).
 
 ### 9.4 FlightTrackingForegroundService (`lib/services/flight_tracking_foreground_service.dart`)
 
-Singleton. Android-only. Manages persistent foreground service + custom RemoteViews notifications for live flight tracking.
+Singleton. **Cross-platform** (Android + iOS). Manages live flight tracking UI on both platforms:
+- **Android:** Foreground service + custom RemoteViews notifications (see Section 13.5)
+- **iOS:** Live Activities via ActivityKit (see Section 13.6)
 
-**Notification Channels:**
+**Notification Channels (Android):**
 - `flight_tracking_service` (LOW importance) — foreground service keepalive
 - `flight_tracking_live` (LOW importance) — per-flight custom notifications
 
 **Key Classes:**
-- `FlightTrackingData` — DTO passed from `main.dart` (firestoreId, flightNumber, originCity, destinationCity, departureDateTime, arrivalDateTime, departureTerminal, arrivalTerminal, gate)
-- `_TrackedFlight` — internal mutable state (status, gate, delayMinutes, diversionAirport, baggageBelt)
+- `FlightTrackingData` — DTO passed from `main.dart` (firestoreId, flightNumber, originCity, destinationCity, departureDateTime, arrivalDateTime, departureTerminal, arrivalTerminal, gate, originAirport, destinationAirport)
+- `_TrackedFlight` — internal mutable state (status, gate, delayMinutes, diversionAirport, baggageBelt, liveActivityId)
 - `_FlightTrackingTaskHandler` — top-level foreground task callback (no-op, updates via FCM)
+
+**MethodChannels:**
+- `com.example.airtime/flight_notification` — Android: communicates with `FlightNotificationHelper.kt`
+- `com.example.airtime/live_activity` — iOS: communicates with `LiveActivityManager.swift`
 
 **Key Methods:**
 
-| Method | Purpose |
-|--------|---------|
-| `init()` | Configure foreground task, create notification channel, start FCM listener |
-| `evaluateFlights(flights)` | Filter flights eligible for tracking (departed or departing within 24h), start service |
-| `_showFlightNotification(id)` | Compute phase (pre-departure/in-flight/landed/cancelled/diverted), invoke MethodChannel |
-| `_handleFcmMessage(msg)` | Update tracked flight state from FCM event, re-render notification |
-| `_stopTrackingFlight(id)` | Cancel notification, remove from map, stop service if empty |
-| `_scheduleRemoval(id)` | Auto-remove 30 min after landing |
-
-**MethodChannel:** `com.example.airtime/flight_notification` — communicates with native `FlightNotificationHelper.kt` for custom RemoteViews rendering. See Section 13.5 for full architecture details.
+| Method | Platform | Purpose |
+|--------|----------|---------|
+| `init()` | Both | Android: configure foreground task + notification channel. iOS: set up MethodChannel handler for push token updates. Both: start FCM listener |
+| `evaluateFlights(flights)` | Both | Filter flights eligible for tracking (departed or departing within 24h), start tracking |
+| `_showFlightNotification(id)` | Android | Compute phase, invoke Android MethodChannel |
+| `_startOrUpdateLiveActivity(id)` | iOS | Start new or update existing Live Activity via iOS MethodChannel |
+| `_endLiveActivity(id)` | iOS | End a Live Activity |
+| `_buildLiveActivityParams(id)` | iOS | Build params dict with status, progress, times for Live Activity |
+| `_storeLiveActivityPushToken(id, token)` | iOS | Write `liveActivityPushToken` to flight doc in Firestore |
+| `_handleFcmMessage(msg)` | Both | Update tracked flight state from FCM event, re-render (Android: notification, iOS: Live Activity) |
+| `_stopTrackingFlight(id)` | Both | Android: cancel notification. iOS: end Live Activity. Remove from map, stop service if empty |
+| `_scheduleRemoval(id)` | Both | Auto-remove 30 min after landing |
 
 ### 9.5 TravelService (`lib/services/travel_service.dart`)
 
@@ -631,6 +663,22 @@ Cirium POSTs to ciriumAlertWebhook
     → FcmService.sendToUser(userId, notification)
   → Update flight doc: lastAlertType, lastAlertAt, lastAlertDetails
 ```
+
+### Pipeline E: iOS Live Activity Updates (APNs push, automatic)
+
+```
+Cirium webhook updates flight doc (lastAlertType, lastAlertDetails)
+  → onFlightAlertUpdated Firestore trigger fires
+  → Check if lastAlertType/lastAlertDetails actually changed
+  → Read liveActivityPushToken from flight doc
+  → If no token → return (no Live Activity running)
+  → Map event type to ContentState (status, progress, gate, delay, etc.)
+  → ApnsService.sendLiveActivityUpdate(pushToken, contentState) via HTTP/2 to APNs
+  → If ARRIVAL → also send end event after 2s delay
+  → iOS wakes Widget Extension → re-renders SwiftUI views on Lock Screen / Dynamic Island
+```
+
+**Note:** This pipeline runs in parallel with Pipeline D (FCM). The existing `ciriumAlertWebhook` is NOT modified — it writes `lastAlertType`/`lastAlertDetails` to the flight doc, and this new trigger reacts to those writes.
 
 ---
 
@@ -857,6 +905,211 @@ Android RemoteViews only supports a **limited set of views**:
 - **Allowed:** `LinearLayout`, `RelativeLayout`, `FrameLayout`, `GridLayout`, `TextView`, `ImageView`, `ProgressBar`, `Button`, `Chronometer`, `ViewFlipper`
 - **NOT allowed:** `View`, `ConstraintLayout`, `RecyclerView`, custom views, `CardView`
 - Spacers must use `<TextView>` with `layout_weight` instead of `<View>`
+
+---
+
+## 13.6. iOS LIVE ACTIVITIES (Live Flight Tracking)
+
+iOS Live Activities display real-time flight status on the Lock Screen and Dynamic Island (iPhone 14 Pro+). Uses ActivityKit for lifecycle management and WidgetKit for SwiftUI rendering, with APNs push tokens for background updates.
+
+### Architecture Overview
+
+```
+Flutter (Dart)                          iOS (Swift)
+┌────────────────────────────┐         ┌──────────────────────────────────┐
+│ FlightTrackingForeground   │         │ AppDelegate                      │
+│ Service                    │────────▶│   MethodChannel handler          │
+│                            │ invoke  │   ↓                              │
+│ _startOrUpdateLiveActivity │ Method  │ LiveActivityManager              │
+│ _endLiveActivity           │ Channel │   .startActivity(params)         │
+│ _buildLiveActivityParams   │         │   .updateActivity(params)        │
+│                            │◀────────│   .endActivity(params)           │
+│ _storeLiveActivityPushToken│ callback│   push token observation loop    │
+└────────────────────────────┘         └──────────────────────────────────┘
+
+                                       Widget Extension (separate target)
+                                       ┌──────────────────────────────────┐
+                                       │ FlightTrackingAttributes         │
+                                       │   static: flightNumber, cities,  │
+                                       │     airports, scheduled times    │
+                                       │   ContentState: status, gate,    │
+                                       │     delay, progress, ETA, etc.   │
+                                       │                                  │
+                                       │ FlightActivityWidget (SwiftUI)   │
+                                       │   Lock Screen view               │
+                                       │   Dynamic Island compact/expanded│
+                                       └──────────────────────────────────┘
+
+Backend (separate — no existing code touched)
+┌─────────────────────────────────────────────────────┐
+│ onFlightAlertUpdated (Firestore onUpdate trigger)    │
+│   watches: users/{userId}/flights/{flightId}         │
+│   when: lastAlertType or lastAlertDetails changes    │
+│   reads: liveActivityPushToken from doc              │
+│   calls: ApnsService.sendLiveActivityUpdate()        │
+│          (or sendLiveActivityEnd for ARRIVAL)         │
+└─────────────────────────────────────────────────────┘
+```
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `ios/FlightTrackingWidget/FlightTrackingAttributes.swift` | `ActivityAttributes` model — static flight data + dynamic `ContentState` |
+| `ios/FlightTrackingWidget/FlightActivityWidget.swift` | SwiftUI views for Lock Screen, Dynamic Island (compact leading/trailing, expanded 4-region, minimal) |
+| `ios/Runner/LiveActivityManager.swift` | Singleton managing ActivityKit lifecycle, push token observation, maps Firestore ID → activity ID |
+| `ios/Runner/AppDelegate.swift` | MethodChannel (`com.example.airtime/live_activity`) routing to `LiveActivityManager` |
+| `functions/src/services/apnsService.ts` | APNs HTTP/2 push sender with JWT ES256 (.p8 key) auth |
+| `functions/src/liveActivity/index.ts` | Firestore trigger `onFlightAlertUpdated` — maps alert events to ContentState, sends APNs |
+
+### MethodChannel: `com.example.airtime/live_activity`
+
+| Method | Direction | Purpose |
+|--------|-----------|---------|
+| `startLiveActivity` | Dart → Swift | Start Live Activity, returns `{activityId, pushToken}` |
+| `updateLiveActivity` | Dart → Swift | Update existing Live Activity with new ContentState |
+| `endLiveActivity` | Dart → Swift | End Live Activity with final state |
+| `areActivitiesEnabled` | Dart → Swift | Check if user has Live Activities enabled |
+| `endAllActivities` | Dart → Swift | End all active Live Activities |
+| `onPushTokenUpdate` | Swift → Dart | Callback when push token changes (Dart stores it in Firestore) |
+
+### ActivityAttributes Data Model
+
+```swift
+struct FlightTrackingAttributes: ActivityAttributes {
+    // Static (immutable after creation)
+    var flightNumber: String           // "LX147"
+    var originCity: String             // "Delhi"
+    var destinationCity: String        // "Zurich"
+    var originAirport: String          // "DEL"
+    var destinationAirport: String     // "ZRH"
+    var scheduledDeparture: Date
+    var scheduledArrival: Date
+
+    // Dynamic (updated via ActivityKit or APNs push)
+    struct ContentState: Codable, Hashable {
+        var status: String             // "Scheduled"/"In Flight"/"Landed"/"Cancelled"/"Diverted"/"Delayed"
+        var departureGate: String?
+        var arrivalGate: String?
+        var departureTerminal: String?
+        var arrivalTerminal: String?
+        var estimatedDeparture: Date
+        var estimatedArrival: Date
+        var delayMinutes: Int
+        var progress: Int              // 0-100
+        var baggageBelt: String?
+        var diversionAirport: String?
+    }
+}
+```
+
+### Lock Screen View Design
+
+```
+┌──────────────────────────────────────────┐
+│  LX147                         On Time   │
+│  DEL → ZRH                              │
+│  ●━━━━━━━━━━━━✈━━━━━━━━━━━━●            │
+│  01:45 AM              06:20 AM          │
+│  Delhi                    Zurich         │
+│  Gate T3 · Terminal 3                    │
+└──────────────────────────────────────────┘
+```
+
+- Black tinted background, white text
+- Flight number (bold) + status (color-coded: green/orange/red)
+- Airport code route with arrow
+- Progress bar with green fill + airplane icon + endpoint dots
+- Departure/arrival times (monospaced) with city names
+- Bottom: gate + terminal + baggage info via SF Symbol labels
+
+### Dynamic Island Presentations
+
+**Compact:** Leading = SF Symbol (airplane.departure/airplane/airplane.arrival), Trailing = `Text(estimatedArrival, style: .timer)` auto-updating countdown
+
+**Expanded:** 4 regions — Leading: origin airport+city+time, Trailing: destination airport+city+time, Center: flight number, Bottom: progress bar + status + gate
+
+**Minimal:** Airplane SF Symbol with status color
+
+### Status Color Coding (SwiftUI)
+
+```swift
+switch state.status {
+    case "Cancelled": .red
+    case "Diverted":  .orange
+    default:          state.delayMinutes > 0 ? .orange : .green
+}
+```
+
+### Push Token Flow (Background Updates)
+
+```
+1. Dart starts Live Activity via MethodChannel
+2. Swift creates activity with pushType: .token
+3. ActivityKit provides unique APNs push token
+4. Swift sends token back to Dart via onPushTokenUpdate callback
+5. Dart writes token to Firestore: users/{uid}/flights/{flightId}.liveActivityPushToken
+6. When Cirium webhook fires → updates lastAlertType on flight doc
+7. onFlightAlertUpdated trigger reads liveActivityPushToken
+8. ApnsService sends HTTP/2 push to APNs with updated ContentState
+9. iOS wakes Widget Extension → re-renders SwiftUI views
+```
+
+Token can change during activity lifetime — observed via `activity.pushTokenUpdates` async sequence, re-sent to Dart on each change.
+
+### APNs Push Payload Format
+
+**Update:**
+```json
+{
+  "aps": {
+    "timestamp": 1705560370,
+    "event": "update",
+    "content-state": {
+      "status": "In Flight",
+      "departureGate": "T3",
+      "estimatedDeparture": 1705549570,
+      "estimatedArrival": 1705582170,
+      "delayMinutes": 0,
+      "progress": 45
+    },
+    "stale-date": 1705567570
+  }
+}
+```
+
+**End (after ARRIVAL):**
+```json
+{
+  "aps": {
+    "timestamp": 1705560370,
+    "event": "end",
+    "content-state": { "status": "Landed", "progress": 100 },
+    "dismissal-date": 1705574770
+  }
+}
+```
+
+**Required APNs Headers:** `apns-push-type: liveactivity`, `apns-topic: com.example.airtime.push-type.liveactivity`, `apns-priority: 10`
+
+### iOS Constraints
+
+| Constraint | Value |
+|------------|-------|
+| Max simultaneous activities per app | 5 |
+| Max data size (static + dynamic) | 4 KB |
+| Lock Screen view max height | 160 points |
+| Active duration before auto-end | 8 hours |
+| Post-end Lock Screen retention | 4 hours |
+| Min iOS version | 16.1 |
+| Dynamic Island | iPhone 14 Pro+ only |
+
+### Xcode Setup Required (Manual)
+
+1. Add Widget Extension target: `FlightTrackingWidget`
+2. Add App Group to Runner + Widget Extension: `group.com.example.airtime`
+3. Add Push Notifications capability to Runner
+4. Set widget deployment target to iOS 16.1
 
 ---
 

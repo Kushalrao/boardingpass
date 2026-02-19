@@ -482,6 +482,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               arrivalDateTime: t.arrivalDateTime,
               departureTerminal: t.flight?.departureTerminal,
               arrivalTerminal: t.flight?.arrivalTerminal,
+              originAirport: t.flight?.departureAirportFsCode,
+              destinationAirport: t.flight?.arrivalAirportFsCode,
             ))
         .toList();
 

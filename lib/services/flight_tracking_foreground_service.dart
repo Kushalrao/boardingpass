@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart'
     hide NotificationVisibility;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -21,6 +23,9 @@ class FlightTrackingData {
   final String? departureTerminal;
   final String? arrivalTerminal;
   final String? gate;
+  // iOS Live Activity needs airport codes
+  final String? originAirport;
+  final String? destinationAirport;
 
   FlightTrackingData({
     required this.firestoreId,
@@ -32,6 +37,8 @@ class FlightTrackingData {
     this.departureTerminal,
     this.arrivalTerminal,
     this.gate,
+    this.originAirport,
+    this.destinationAirport,
   });
 }
 
@@ -78,6 +85,8 @@ class _TrackedFlight {
   final DateTime departureDateTime;
   final DateTime? arrivalDateTime;
   final int notificationId;
+  final String? originAirport;
+  final String? destinationAirport;
 
   // Mutable state updated by FCM events
   String? gate;
@@ -87,6 +96,9 @@ class _TrackedFlight {
   String? status; // null=scheduled, 'departed', 'landed', 'cancelled', 'diverted'
   String? diversionAirport;
   String? baggageBelt;
+
+  // iOS Live Activity state
+  String? liveActivityId;
 
   _TrackedFlight({
     required this.flightNumber,
@@ -98,6 +110,8 @@ class _TrackedFlight {
     this.gate,
     this.departureTerminal,
     this.arrivalTerminal,
+    this.originAirport,
+    this.destinationAirport,
   });
 }
 
@@ -111,8 +125,14 @@ class FlightTrackingForegroundService {
   factory FlightTrackingForegroundService() => _instance;
   FlightTrackingForegroundService._internal();
 
-  static const MethodChannel _channel =
+  // Android MethodChannel (existing)
+  static const MethodChannel _androidChannel =
       MethodChannel('com.example.airtime/flight_notification');
+
+  // iOS MethodChannel (new)
+  static const MethodChannel _iosChannel =
+      MethodChannel('com.example.airtime/live_activity');
+
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   final Map<String, _TrackedFlight> _trackedFlights = {};
@@ -122,9 +142,22 @@ class FlightTrackingForegroundService {
   /// Initialize the service. Call once after Firebase is ready.
   Future<void> init() async {
     if (_initialized) return;
-    if (!Platform.isAndroid) return; // Android only for now
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     _initialized = true;
 
+    if (Platform.isAndroid) {
+      await _initAndroid();
+    } else if (Platform.isIOS) {
+      _initIOS();
+    }
+
+    // Listen to FCM messages — separate from existing NotificationService listener
+    _fcmSubscription = FirebaseMessaging.onMessage.listen(_handleFcmMessage);
+
+    debugPrint('[FlightTracking] Initialized (${Platform.isIOS ? "iOS" : "Android"})');
+  }
+
+  Future<void> _initAndroid() async {
     // Set up communication port (safe to call from here)
     FlutterForegroundTask.initCommunicationPort();
 
@@ -163,17 +196,25 @@ class FlightTrackingForegroundService {
         ),
       );
     }
+  }
 
-    // Listen to FCM messages — separate from existing NotificationService listener
-    _fcmSubscription = FirebaseMessaging.onMessage.listen(_handleFcmMessage);
-
-    debugPrint('[FlightTracking] Initialized');
+  void _initIOS() {
+    // Listen for push token updates from native side
+    _iosChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onPushTokenUpdate') {
+        final args = call.arguments as Map;
+        final flightId = args['flightId'] as String;
+        final pushToken = args['pushToken'] as String;
+        debugPrint('[FlightTracking] iOS push token for $flightId: $pushToken');
+        await _storeLiveActivityPushToken(flightId, pushToken);
+      }
+    });
   }
 
   /// Evaluate flights and start tracking eligible ones.
   /// Call after loading trips from Firestore.
   Future<void> evaluateFlights(List<FlightTrackingData> flights) async {
-    if (!Platform.isAndroid || !_initialized) return;
+    if (!_initialized) return;
 
     final now = DateTime.now();
     final cutoff = now.add(const Duration(hours: 24));
@@ -200,12 +241,17 @@ class FlightTrackingForegroundService {
       }
     }
 
-    // Start foreground service if we have flights to track
+    // Start tracking
     if (_trackedFlights.isNotEmpty) {
-      await _ensureServiceRunning();
-      // Show/refresh notifications for all tracked flights
+      if (Platform.isAndroid) {
+        await _ensureServiceRunning();
+      }
       for (final id in _trackedFlights.keys) {
-        await _showFlightNotification(id);
+        if (Platform.isAndroid) {
+          await _showFlightNotification(id);
+        } else if (Platform.isIOS) {
+          await _startOrUpdateLiveActivity(id);
+        }
       }
     }
   }
@@ -224,6 +270,8 @@ class FlightTrackingForegroundService {
       gate: data.gate,
       departureTerminal: data.departureTerminal,
       arrivalTerminal: data.arrivalTerminal,
+      originAirport: data.originAirport,
+      destinationAirport: data.destinationAirport,
     );
 
     debugPrint(
@@ -231,7 +279,7 @@ class FlightTrackingForegroundService {
   }
 
   // ============================================================
-  // NOTIFICATION CONTENT — builds per flight phase
+  // ANDROID — NOTIFICATION CONTENT (existing, unchanged)
   // ============================================================
 
   Future<void> _showFlightNotification(String flightId) async {
@@ -328,7 +376,7 @@ class FlightTrackingForegroundService {
       progress = 0;
     }
 
-    await _channel.invokeMethod('showFlightNotification', {
+    await _androidChannel.invokeMethod('showFlightNotification', {
       'notificationId': tracked.notificationId,
       'title': title,
       'contentLine': contentLine,
@@ -344,6 +392,134 @@ class FlightTrackingForegroundService {
       'departureTime': _formatTime(tracked.departureDateTime),
       'arrivalTime': _formatTime(tracked.arrivalDateTime),
     });
+  }
+
+  // ============================================================
+  // iOS — LIVE ACTIVITY MANAGEMENT
+  // ============================================================
+
+  Map<String, dynamic> _buildLiveActivityParams(String flightId) {
+    final tracked = _trackedFlights[flightId];
+    if (tracked == null) return {};
+
+    final now = DateTime.now();
+    final departed = tracked.departureDateTime.isBefore(now);
+    final landed = tracked.arrivalDateTime != null &&
+        tracked.arrivalDateTime!.isBefore(now);
+
+    String status;
+    int progress = 0;
+
+    if (tracked.status == 'cancelled') {
+      status = 'Cancelled';
+    } else if (tracked.status == 'diverted') {
+      status = 'Diverted';
+      progress = 50;
+    } else if (landed || tracked.status == 'landed') {
+      status = 'Landed';
+      progress = 100;
+    } else if (departed || tracked.status == 'departed') {
+      status = 'In Flight';
+      if (tracked.arrivalDateTime != null) {
+        final totalMinutes = tracked.arrivalDateTime!
+            .difference(tracked.departureDateTime)
+            .inMinutes;
+        final elapsed = now.difference(tracked.departureDateTime).inMinutes;
+        progress = totalMinutes > 0
+            ? ((elapsed / totalMinutes) * 100).clamp(0, 100).toInt()
+            : 50;
+      }
+    } else {
+      status = (tracked.delayMinutes != null && tracked.delayMinutes! > 0)
+          ? 'Delayed'
+          : 'Scheduled';
+    }
+
+    return {
+      'flightId': flightId,
+      'flightNumber': tracked.flightNumber,
+      'originCity': tracked.originCity,
+      'destinationCity': tracked.destinationCity,
+      'originAirport': tracked.originAirport ?? tracked.originCity,
+      'destinationAirport': tracked.destinationAirport ?? tracked.destinationCity,
+      'scheduledDeparture': tracked.departureDateTime.millisecondsSinceEpoch.toDouble(),
+      'scheduledArrival': (tracked.arrivalDateTime ?? tracked.departureDateTime.add(const Duration(hours: 2))).millisecondsSinceEpoch.toDouble(),
+      'status': status,
+      'departureGate': tracked.gate,
+      'arrivalGate': tracked.arrivalTerminal != null ? null : null, // No arrival gate from current data
+      'departureTerminal': tracked.departureTerminal,
+      'arrivalTerminal': tracked.arrivalTerminal,
+      'estimatedDeparture': tracked.departureDateTime.millisecondsSinceEpoch.toDouble(),
+      'estimatedArrival': (tracked.arrivalDateTime ?? tracked.departureDateTime.add(const Duration(hours: 2))).millisecondsSinceEpoch.toDouble(),
+      'delayMinutes': tracked.delayMinutes ?? 0,
+      'progress': progress,
+      'baggageBelt': tracked.baggageBelt,
+      'diversionAirport': tracked.diversionAirport,
+    };
+  }
+
+  Future<void> _startOrUpdateLiveActivity(String flightId) async {
+    final tracked = _trackedFlights[flightId];
+    if (tracked == null) return;
+
+    final params = _buildLiveActivityParams(flightId);
+    if (params.isEmpty) return;
+
+    if (tracked.liveActivityId != null) {
+      // Already started — update
+      try {
+        await _iosChannel.invokeMethod('updateLiveActivity', params);
+        debugPrint('[FlightTracking] iOS: Updated Live Activity for ${tracked.flightNumber}');
+      } catch (e) {
+        debugPrint('[FlightTracking] iOS: Failed to update Live Activity: $e');
+      }
+    } else {
+      // Start new Live Activity
+      try {
+        final result = await _iosChannel.invokeMethod<Map>('startLiveActivity', params);
+        if (result != null) {
+          tracked.liveActivityId = result['activityId'] as String?;
+          final pushToken = result['pushToken'] as String?;
+          debugPrint('[FlightTracking] iOS: Started Live Activity ${tracked.liveActivityId} for ${tracked.flightNumber}');
+          if (pushToken != null) {
+            await _storeLiveActivityPushToken(flightId, pushToken);
+          }
+        }
+      } catch (e) {
+        debugPrint('[FlightTracking] iOS: Failed to start Live Activity: $e');
+      }
+    }
+  }
+
+  Future<void> _endLiveActivity(String flightId) async {
+    final tracked = _trackedFlights[flightId];
+    if (tracked == null || tracked.liveActivityId == null) return;
+
+    final params = _buildLiveActivityParams(flightId);
+    try {
+      await _iosChannel.invokeMethod('endLiveActivity', params);
+      debugPrint('[FlightTracking] iOS: Ended Live Activity for ${tracked.flightNumber}');
+    } catch (e) {
+      debugPrint('[FlightTracking] iOS: Failed to end Live Activity: $e');
+    }
+  }
+
+  Future<void> _storeLiveActivityPushToken(String flightId, String pushToken) async {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) return;
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .collection('flights')
+          .doc(flightId)
+          .update({'liveActivityPushToken': pushToken});
+
+      debugPrint('[FlightTracking] Stored Live Activity push token for $flightId');
+    } catch (e) {
+      debugPrint('[FlightTracking] Failed to store push token: $e');
+    }
   }
 
   // ============================================================
@@ -406,8 +582,12 @@ class FlightTrackingForegroundService {
         break;
     }
 
-    // Re-render the notification with updated state
-    _showFlightNotification(matchedId);
+    // Re-render with updated state
+    if (Platform.isAndroid) {
+      _showFlightNotification(matchedId);
+    } else if (Platform.isIOS) {
+      _startOrUpdateLiveActivity(matchedId);
+    }
   }
 
   // ============================================================
@@ -423,12 +603,16 @@ class FlightTrackingForegroundService {
   Future<void> _stopTrackingFlight(String flightId) async {
     final tracked = _trackedFlights.remove(flightId);
     if (tracked != null) {
-      await _channel.invokeMethod('cancelFlightNotification', tracked.notificationId);
+      if (Platform.isAndroid) {
+        await _androidChannel.invokeMethod('cancelFlightNotification', tracked.notificationId);
+      } else if (Platform.isIOS && tracked.liveActivityId != null) {
+        await _endLiveActivity(flightId);
+      }
       debugPrint(
           '[FlightTracking] Stopped tracking ${tracked.flightNumber}');
     }
 
-    if (_trackedFlights.isEmpty) {
+    if (_trackedFlights.isEmpty && Platform.isAndroid) {
       await FlutterForegroundTask.stopService();
       debugPrint('[FlightTracking] No more flights — service stopped');
     }

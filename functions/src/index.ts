@@ -918,3 +918,8 @@ export {
   deleteTrainBooking,
   onTrainCreated,
 } from './trains/index';
+
+// ============================================
+// LIVE ACTIVITY FUNCTIONS
+// ============================================
+export { onFlightAlertUpdated } from './liveActivity/index';
