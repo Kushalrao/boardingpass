@@ -41,10 +41,10 @@ Airtime is a **Flutter-based travel tracking application** that:
 │       ├── notification_service.dart # FCM + local notifications
 │       ├── flight_tracking_foreground_service.dart  # Cross-platform: Android foreground service + iOS Live Activities
 │       ├── travel_service.dart       # Gmail travel extraction via Firebase Functions
-│       └── services.dart             # Barrel export
+│       └── services.dart             # Barrel export (only exports cirium_api_service.dart)
 ├── functions/                        # Firebase Cloud Functions (Node.js/TypeScript)
 │   ├── src/
-│   │   ├── index.ts                  # All cloud function exports (921 lines)
+│   │   ├── index.ts                  # All cloud function exports (925 lines)
 │   │   ├── types/
 │   │   │   ├── bookingTypes.ts       # TypeScript booking interfaces
 │   │   │   └── schemas.ts           # OpenAI system prompts per booking type
@@ -99,10 +99,13 @@ Airtime is a **Flutter-based travel tracking application** that:
 │   ├── Runner/
 │   │   ├── AppDelegate.swift             # Flutter config, Firebase, FCM + Live Activity MethodChannel
 │   │   ├── LiveActivityManager.swift     # ActivityKit lifecycle: start, update, end + push token observation
-│   │   └── Info.plist                    # NSSupportsLiveActivities = YES
+│   │   ├── Runner.entitlements           # APNs + App Group (group.com.example.airtime)
+│   │   └── Info.plist                    # NSSupportsLiveActivities + NSSupportsLiveActivitiesFrequentUpdates
 │   └── FlightTrackingWidget/            # Widget Extension target (iOS 16.1+)
 │       ├── FlightTrackingAttributes.swift # ActivityAttributes model (static + ContentState)
-│       └── FlightActivityWidget.swift    # SwiftUI views: Lock Screen, Dynamic Island (compact/expanded/minimal)
+│       ├── FlightActivityWidget.swift    # SwiftUI views: Lock Screen, Dynamic Island (compact/expanded/minimal)
+│       ├── FlightTrackingWidgetExtension.entitlements  # App Group (group.com.example.airtime)
+│       └── Info.plist                    # WidgetKit extension config
 ├── web/, linux/, macos/, windows/        # Platform-specific code
 ├── assets/                           # Image assets
 ├── pubspec.yaml                      # Flutter deps
@@ -123,11 +126,14 @@ Airtime is a **Flutter-based travel tracking application** that:
 | **Frontend** | Flutter/Dart | SDK ^3.8.1 |
 | **Auth** | Firebase Auth + Google Sign-In | firebase_auth ^5.3.4, google_sign_in ^6.2.1 |
 | **Database** | Cloud Firestore | cloud_firestore ^5.6.0 |
+| **Cloud Functions Client** | Firebase Cloud Functions (Flutter) | cloud_functions ^5.1.4 |
 | **Backend Functions** | Firebase Cloud Functions (Node.js 20) | firebase-functions ^5.0.0 |
 | **AI Extraction** | OpenAI GPT-3.5-turbo | openai ^4.20.0 |
 | **Flight Data** | Cirium FlightStats API | REST API v2 |
 | **Push Notifications** | Firebase Cloud Messaging | firebase_messaging ^15.1.6 |
+| **Local Notifications** | flutter_local_notifications | ^18.0.1 |
 | **Maps** | Google Maps Flutter | google_maps_flutter ^2.6.1 |
+| **Foreground Service** | flutter_foreground_task | ^8.0.0 |
 | **Live Flight Notifications (Android)** | Custom RemoteViews + MethodChannel | Native Kotlin + DecoratedCustomViewStyle |
 | **Live Flight Notifications (iOS)** | iOS Live Activities (ActivityKit + WidgetKit) | Native Swift + SwiftUI + APNs push tokens |
 | **Train Data** | Custom Python scraper on Cloud Run | FastAPI + Selenium + BeautifulSoup |
@@ -319,13 +325,19 @@ users/{userId}
 
 ### 8.1 Entry Point (`lib/main.dart`)
 
-The entire UI is in a single file (~1800+ lines). It uses **StatefulWidget with TickerProviderStateMixin** — no third-party state management.
+The entire UI is in a single file (~1643 lines). It uses **StatefulWidget with TickerProviderStateMixin** — no third-party state management.
+
+**App Version:** `1.0.0+1`
 
 **App Initialization:**
-1. Google Maps Flutter initialization (Android renderer)
+1. Google Maps Flutter initialization (Android: latest renderer for cloud-based styling)
 2. Firebase initialization
 3. FCM background handler registration
 4. Run `MyApp` → `MaterialApp` → `HomePage`
+
+**iOS Deployment Targets:**
+- Runner (main app): iOS 13.0
+- FlightTrackingWidget (widget extension): iOS 16.1
 
 ### 8.2 Screen Modes
 
@@ -1170,7 +1182,7 @@ gcloud run deploy train-scraper --image gcr.io/airtime-4e65f/train-scraper --reg
 
 1. **Security:** API credentials are hardcoded in Dart code (`cirium_api_service.dart`) and in `ciriumAlertService.ts`. Should use env vars or Firebase Remote Config.
 2. **Security:** `functions/.env` contains exposed secrets. Listed in `.gitignore` but may have been tracked.
-3. **Single-file UI:** All UI is in `main.dart` (~1800+ lines). Consider splitting into separate screen files.
+3. **Single-file UI:** All UI is in `main.dart` (~1643 lines). Consider splitting into separate screen files.
 4. **No state management:** Uses raw `setState()`. May need Provider/Riverpod as app grows.
 5. **Currently only flight bookings** are processed by the Gmail pipeline. Hotel/train/bus etc. are detected but skipped in `analyzeTravel`.
 6. **Fixed currency rates:** INR conversion uses hardcoded rates (USD=83, EUR=90, GBP=105).
@@ -1211,5 +1223,5 @@ The full PRD defines **41+ distinct states** across two screens:
 
 ---
 
-*Last updated: 2026-02-11*
+*Last updated: 2026-02-19*
 *Auto-generated from full codebase analysis*

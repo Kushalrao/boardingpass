@@ -7,16 +7,124 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import os
+import re
+
+import logging
 
 from scrapers.pnr_status import PNRStatusChecker
 from scrapers.confirmtkt_scraper import ConfirmTktScraper
-from scrapers.ntes_scraper import IndianRailwaysAPI
+from scrapers.ntes_scraper import IndianRailwaysAPI, RailwayInfoScraper
+from scrapers.ixigo_scraper import IxigoScraper
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Train Scraper API",
     description="API for fetching Indian Railways train data",
     version="1.0.0"
 )
+
+# Helper functions
+def parse_delay(delay_value) -> Optional[int]:
+    """Convert delay string/value to integer minutes."""
+    if delay_value is None:
+        return None
+    if isinstance(delay_value, int):
+        return delay_value
+    if isinstance(delay_value, str):
+        s = delay_value.strip().lower()
+        if s in ('right time', 'on time', 'rt', '--', ''):
+            return 0
+        match = re.search(r'(\d+)', s)
+        if match:
+            minutes = int(match.group(1))
+            if 'hr' in s or 'hour' in s:
+                minutes *= 60
+            return minutes
+    return None
+
+
+def clean_train_name(name: Optional[str]) -> Optional[str]:
+    """Remove garbage text from train name."""
+    if not name:
+        return name
+    name = name.split('\n')[0].strip()
+    # Remove trailing noise like "CHANGE", "G", "N" etc.
+    name = re.sub(r'\s*(CHANGE|Running Status|Live Status).*$', '', name, flags=re.I).strip()
+    return name if name else None
+
+
+def normalize_station_name(name: str) -> str:
+    """Normalize station name for matching across sources."""
+    if not name:
+        return ""
+    s = name.strip().lower()
+    s = re.sub(r'\b(jn|junction|junc|terminus|term|central|city|halt|road|t)\b', '', s)
+    s = re.sub(r'[^a-z0-9\s]', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def merge_live_status(primary: Dict[str, Any], enrichment: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge enrichment data (ixigo) into primary data (ConfirmTkt).
+    Fills in missing platform, halt, actual_arrival, code fields.
+    If primary has no stations, uses enrichment entirely.
+    """
+    if not primary.get("stations"):
+        return enrichment
+    if not enrichment.get("stations"):
+        return primary
+
+    # Build lookup from enrichment stations by code and normalized name
+    enrich_by_code = {}
+    enrich_by_name = {}
+    for s in enrichment["stations"]:
+        code = s.get("code", "")
+        name = s.get("station") or s.get("name", "")
+        if code:
+            enrich_by_code[code.upper()] = s
+        norm = normalize_station_name(name)
+        if norm:
+            enrich_by_name[norm] = s
+
+    # Merge into primary stations
+    for station in primary["stations"]:
+        p_code = station.get("code", "")
+        p_name = station.get("station") or station.get("name", "")
+        norm = normalize_station_name(p_name)
+
+        # Find match: prefer code, fallback to name
+        match = None
+        if p_code:
+            match = enrich_by_code.get(p_code.upper())
+        if not match and norm:
+            match = enrich_by_name.get(norm)
+
+        if match:
+            if not station.get("platform") and match.get("platform"):
+                station["platform"] = match["platform"]
+            if not station.get("halt") and match.get("halt"):
+                station["halt"] = match["halt"]
+            if not station.get("scheduled_arrival") and not station.get("arrival"):
+                station["scheduled_arrival"] = match.get("scheduled_arrival")
+            if not station.get("actual_arrival") and match.get("actual_arrival"):
+                station["actual_arrival"] = match["actual_arrival"]
+            if station.get("delay") is None and match.get("delay") is not None:
+                station["delay"] = match["delay"]
+            if not station.get("code") and match.get("code"):
+                station["code"] = match["code"]
+
+    # Merge top-level fields if missing in primary
+    if not primary.get("train_name") and enrichment.get("train_name"):
+        primary["train_name"] = enrichment["train_name"]
+    if not primary.get("current_location") and enrichment.get("current_location"):
+        primary["current_location"] = enrichment["current_location"]
+    if not primary.get("last_updated") and enrichment.get("last_updated"):
+        primary["last_updated"] = enrichment["last_updated"]
+
+    return primary
+
 
 # Response Models
 class Station(BaseModel):
@@ -70,6 +178,8 @@ class LiveStationStatus(BaseModel):
     scheduledArrival: Optional[str] = None
     actualArrival: Optional[str] = None
     delay: Optional[int] = None
+    halt: Optional[str] = None
+    platform: Optional[int] = None
     status: str  # 'departed', 'arrived', 'upcoming'
 
 class LiveStatusResponse(BaseModel):
@@ -196,23 +306,82 @@ async def get_train_schedule(train_number: str):
 
         stations = []
         for s in result.get("stations", []):
+            # Handle both confirmtkt key formats
+            code = s.get("code", s.get("station_code", ""))
+            name = s.get("name", s.get("station_name", ""))
+            distance = s.get("distance", s.get("distance_km"))
+            if distance is not None:
+                try:
+                    distance = int(float(distance))
+                except (ValueError, TypeError):
+                    distance = None
+            day = s.get("day", s.get("dayNumber"))
+            if day is not None:
+                try:
+                    day = int(day)
+                except (ValueError, TypeError):
+                    day = None
+
             stations.append(ScheduleStation(
-                code=s.get("code", ""),
-                name=s.get("name", ""),
+                code=code,
+                name=name,
                 arrival=s.get("arrival"),
                 departure=s.get("departure"),
-                halt=s.get("halt"),
-                distance=s.get("distance"),
-                dayNumber=s.get("day")
+                halt=s.get("halt", s.get("halt_time")),
+                distance=distance,
+                dayNumber=day
             ))
 
+        train_name = clean_train_name(result.get("train_name"))
+
+        # Fallback: if confirmtkt returned no stations, try RailwayInfoScraper
+        if not stations:
+            try:
+                ri_scraper = RailwayInfoScraper()
+                ri_result = ri_scraper.get_train_schedule(train_number)
+                for s in ri_result.get("stations", []):
+                    distance = s.get("distance")
+                    if distance is not None:
+                        try:
+                            distance = int(re.sub(r'[^\d]', '', str(distance))) if distance else None
+                        except (ValueError, TypeError):
+                            distance = None
+                    day = s.get("day")
+                    if day is not None:
+                        try:
+                            day = int(day)
+                        except (ValueError, TypeError):
+                            day = None
+                    stations.append(ScheduleStation(
+                        code=s.get("station_code", ""),
+                        name=s.get("station_name", ""),
+                        arrival=s.get("arrival"),
+                        departure=s.get("departure"),
+                        halt=s.get("halt"),
+                        distance=distance,
+                        dayNumber=day
+                    ))
+                if not train_name:
+                    train_name = clean_train_name(ri_result.get("train_name"))
+            except Exception:
+                pass
+
+        # Fallback: get train name from erail if still missing
+        if not train_name:
+            try:
+                api = IndianRailwaysAPI()
+                info = api.get_train_info(train_number)
+                train_name = info.get("train_name")
+            except Exception:
+                pass
+
         return TrainScheduleResponse(
-            success=result.get("success", False),
+            success=len(stations) > 0,
             trainNumber=train_number,
-            trainName=result.get("train_name"),
+            trainName=train_name,
             runningDays=result.get("running_days", []),
             stations=stations,
-            error=result.get("error")
+            error=result.get("error") if not stations else None
         )
 
     except Exception as e:
@@ -226,7 +395,9 @@ async def get_train_schedule(train_number: str):
 @app.get("/live/{train_number}", response_model=LiveStatusResponse)
 async def get_live_status(train_number: str, date: Optional[str] = None):
     """
-    Get live running status of a train
+    Get live running status of a train.
+    Uses ConfirmTkt as primary source, enriched with ixigo data (platform numbers, halt times).
+    Falls back to ixigo-only if ConfirmTkt fails.
 
     Args:
         train_number: 5-digit train number
@@ -235,38 +406,67 @@ async def get_live_status(train_number: str, date: Optional[str] = None):
     if not train_number.isdigit() or len(train_number) != 5:
         raise HTTPException(status_code=400, detail="Invalid train number. Must be 5 digits.")
 
+    confirmtkt_result = None
+    ixigo_result = None
+
+    # Step 1: Try ConfirmTkt (primary source)
     try:
         scraper = ConfirmTktScraper(headless=True)
-        result = scraper.get_live_status(train_number, date)
-
-        stations = []
-        for s in result.get("stations", []):
-            stations.append(LiveStationStatus(
-                code=s.get("code", ""),
-                name=s.get("name", ""),
-                scheduledArrival=s.get("scheduled_arrival"),
-                actualArrival=s.get("actual_arrival"),
-                delay=s.get("delay"),
-                status=s.get("status", "upcoming")
-            ))
-
-        return LiveStatusResponse(
-            success=result.get("success", False),
-            trainNumber=train_number,
-            trainName=result.get("train_name"),
-            currentStation=result.get("current_station"),
-            lastUpdated=result.get("last_updated"),
-            delay=result.get("delay"),
-            stations=stations,
-            error=result.get("error")
-        )
-
+        confirmtkt_result = scraper.get_live_status(train_number, date)
     except Exception as e:
-        return LiveStatusResponse(
-            success=False,
-            trainNumber=train_number,
-            error=str(e)
-        )
+        logger.error(f"ConfirmTkt scraper failed for {train_number}: {e}")
+        confirmtkt_result = {
+            "success": False, "stations": [],
+            "error": str(e), "train_number": train_number,
+        }
+
+    # Step 2: Try ixigo via Firecrawl (enrichment source)
+    try:
+        ixigo_scraper = IxigoScraper()
+        ixigo_result = ixigo_scraper.get_live_status(train_number, date)
+    except Exception as e:
+        # Silently fail - ixigo is optional enrichment
+        logger.debug(f"ixigo scraper unavailable for {train_number}: {e}")
+        ixigo_result = None
+
+    # Step 3: Merge results
+    if confirmtkt_result and confirmtkt_result.get("success") and confirmtkt_result.get("stations"):
+        if ixigo_result and ixigo_result.get("stations"):
+            result = merge_live_status(confirmtkt_result, ixigo_result)
+        else:
+            result = confirmtkt_result
+    elif ixigo_result and ixigo_result.get("success") and ixigo_result.get("stations"):
+        result = ixigo_result
+    else:
+        result = confirmtkt_result or {
+            "success": False, "stations": [],
+            "error": "All scrapers failed", "train_number": train_number,
+        }
+
+    # Step 4: Transform to response model
+    stations = []
+    for s in result.get("stations", []):
+        stations.append(LiveStationStatus(
+            code=s.get("code", s.get("station_code", "")),
+            name=s.get("name", s.get("station", "")),
+            scheduledArrival=s.get("scheduled_arrival", s.get("arrival")),
+            actualArrival=s.get("actual_arrival"),
+            delay=parse_delay(s.get("delay")),
+            halt=s.get("halt"),
+            platform=s.get("platform"),
+            status=s.get("status", "upcoming")
+        ))
+
+    return LiveStatusResponse(
+        success=result.get("success", False),
+        trainNumber=train_number,
+        trainName=clean_train_name(result.get("train_name")),
+        currentStation=result.get("current_station", result.get("current_location")),
+        lastUpdated=result.get("last_updated"),
+        delay=parse_delay(result.get("delay")),
+        stations=stations,
+        error=result.get("error")
+    )
 
 
 @app.get("/search", response_model=SearchTrainsResponse)

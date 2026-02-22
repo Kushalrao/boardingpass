@@ -123,7 +123,10 @@ class ConfirmTktScraper:
             # Extract train name
             name_match = re.search(rf'{train_number}\s*[-–]\s*([A-Z\s]+(?:EXP(?:RES(?:S)?)?|MAIL|RAJ(?:DHANI)?|SF|SPECIAL)?)', page_text)
             if name_match:
-                result["train_name"] = name_match.group(1).strip()
+                name = name_match.group(1).strip()
+                name = re.sub(r'\s*(CHANGE|Schedule|Live).*', '', name, flags=re.I)
+                name = name.split('\n')[0].strip()
+                result["train_name"] = name
 
             # Extract route (e.g., "Kolkata Howrah Junction to New Delhi")
             route_match = re.search(r'([A-Za-z\s]+(?:Junction|Terminus|Central)?)\s+to\s+([A-Za-z\s]+(?:Junction|Terminus|Central)?)', page_text)
@@ -164,6 +167,28 @@ class ConfirmTktScraper:
                         "halt_time": halt if halt != '--' else None,
                         "distance_km": float(dist),
                         "avg_delay_mins": avg_delay,
+                        "day": int(day)
+                    }
+                    result["stations"].append(station)
+                    continue
+
+                # Fallback: more flexible pattern without "km" suffix
+                # e.g. "1 HOWRAH JN HWH -- 16:50 -- 0 1"
+                station_match2 = re.match(
+                    r'^(\d+)\s+([A-Z][A-Z\s\.\-]+?)\s+([A-Z]{2,5})\s+(\d{2}:\d{2}|--)\s+(\d{2}:\d{2}|--)\s+([\d:]+|--)\s+([\d.]+)\s+(\d)$',
+                    line.strip()
+                )
+                if station_match2:
+                    sno, name, code, arr, dep, halt, dist, day = station_match2.groups()
+                    station = {
+                        "sno": int(sno),
+                        "station_name": name.strip().rstrip(' -'),
+                        "station_code": code,
+                        "arrival": arr if arr != '--' else None,
+                        "departure": dep if dep != '--' else None,
+                        "halt_time": halt if halt != '--' else None,
+                        "distance_km": float(dist),
+                        "avg_delay_mins": None,
                         "day": int(day)
                     }
                     result["stations"].append(station)
@@ -243,8 +268,9 @@ class ConfirmTktScraper:
                 name_match = re.search(pattern, page_text)
                 if name_match:
                     name = name_match.group(1).strip()
-                    # Clean up name
-                    name = re.sub(r'\s*(running|Train).*', '', name, flags=re.I)
+                    # Clean up name - remove trailing noise
+                    name = re.sub(r'\s*(running|Train|CHANGE|Live|Status).*', '', name, flags=re.I)
+                    name = name.split('\n')[0].strip()
                     if len(name) > 2:
                         result["train_name"] = name
                         break
@@ -253,7 +279,9 @@ class ConfirmTktScraper:
             if not result["train_name"]:
                 title_match = re.search(rf'{train_number}\s+([A-Z][A-Z\s]+)\s+(?:running|live|status)', page_text, re.I)
                 if title_match:
-                    result["train_name"] = title_match.group(1).strip()
+                    name = title_match.group(1).strip()
+                    name = name.split('\n')[0].strip()
+                    result["train_name"] = name
 
             # Extract current status (e.g., "Train departed from HAJIGARH")
             status_patterns = [
@@ -282,6 +310,12 @@ class ConfirmTktScraper:
                 result["last_updated"] = updated_match.group(1)
 
             # Parse station-wise live status
+            # The page format per station is:
+            #   Station Name
+            #   Day X  DD-Mon
+            #   HH:MM (arrival)
+            #   HH:MM (departure)
+            #   Delay by X hr Y min  OR  Right Time
             lines = page_text.split('\n')
 
             # Skip UI elements
@@ -292,7 +326,6 @@ class ConfirmTktScraper:
             ]
 
             current_station = {}
-            in_station_table = False
 
             for i, line in enumerate(lines):
                 line = line.strip()
@@ -301,14 +334,8 @@ class ConfirmTktScraper:
                 if not line or any(skip in line for skip in skip_patterns):
                     continue
 
-                # Detect start of station table (after "Late" header)
-                if 'Late' in lines[i-1] if i > 0 else False:
-                    in_station_table = True
-                    continue
-
-                # Look for station names - proper station format
-                # Stations usually have "Jn" suffix or are capitalized place names
-                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+Jn)?$', line) and len(line) > 3:
+                # Look for station names - Title Case words (e.g. "Kalyan Jn", "Lokmanyatilak T")
+                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]*)*(?:\s+(?:Jn|T|City))?\.?$', line) and len(line) > 3:
                     # Verify it's not a UI element
                     if line not in ['Right Time', 'On Time']:
                         if current_station and current_station.get('station'):
@@ -316,7 +343,7 @@ class ConfirmTktScraper:
                         current_station = {"station": line}
                         continue
 
-                # Look for date (Day 1 26-Jan or similar)
+                # Look for date (Day 1  20-Feb or similar)
                 if re.match(r'^Day\s+\d+\s+\d{1,2}-\w{3}', line) and current_station:
                     current_station["date"] = line
                     continue
@@ -329,9 +356,27 @@ class ConfirmTktScraper:
                         current_station["departure"] = line
                     continue
 
-                # Look for delay info
-                if (re.match(r'^\d+\s*(min|hr)', line, re.I) or line in ['Right Time', 'On Time', 'RT']) and current_station:
-                    current_station["delay"] = line
+                # Look for delay info - handle "Delay by X hr Y min" format
+                if current_station:
+                    if line in ['Right Time', 'On Time', 'RT']:
+                        current_station["delay"] = 0
+                        continue
+
+                    delay_match = re.match(r'^Delay by\s+(?:(\d+)\s*hr?\s*)?(\d+)?\s*min?', line, re.I)
+                    if delay_match:
+                        hrs = int(delay_match.group(1)) if delay_match.group(1) else 0
+                        mins = int(delay_match.group(2)) if delay_match.group(2) else 0
+                        current_station["delay"] = hrs * 60 + mins
+                        continue
+
+                    # Fallback: simpler delay patterns like "45 min late"
+                    simple_delay = re.match(r'^(\d+)\s*(min|hr)', line, re.I)
+                    if simple_delay:
+                        val = int(simple_delay.group(1))
+                        if 'hr' in simple_delay.group(2).lower():
+                            val *= 60
+                        current_station["delay"] = val
+                        continue
 
             if current_station and current_station.get('station'):
                 result["stations"].append(current_station)
@@ -353,6 +398,17 @@ class ConfirmTktScraper:
                     break  # Stop at first duplicate (likely ad section)
                 if station_name in ad_cities and not s.get('arrival'):
                     break  # Stop at ad section (cities without times)
+
+                # Calculate halt time from arrival and departure
+                if s.get('arrival') and s.get('departure'):
+                    try:
+                        arr = datetime.strptime(s['arrival'], '%H:%M')
+                        dep = datetime.strptime(s['departure'], '%H:%M')
+                        diff = (dep - arr).seconds // 60
+                        if diff > 0 and diff < 120:  # reasonable halt: 1 min to 2 hrs
+                            s["halt"] = f"{diff} min"
+                    except ValueError:
+                        pass
 
                 seen_stations.add(station_name)
                 valid_stations.append(s)
