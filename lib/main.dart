@@ -75,6 +75,8 @@ class Trip {
   final ScheduledFlight? flight;
   final Appendix? appendix;
   final String? firestoreId;
+  final String? gate;
+  final String? baggageBelt;
 
   Trip({
     required this.type,
@@ -89,6 +91,8 @@ class Trip {
     this.flight,
     this.appendix,
     this.firestoreId,
+    this.gate,
+    this.baggageBelt,
   });
 
   bool get isUpcoming => departureDateTime.isAfter(DateTime.now());
@@ -289,6 +293,43 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     // Load trips from Firestore
     await _loadTrips();
 
+    // DEBUG: Add test in-air flight for Live Activity testing
+    if (_authService.hasAuth) {
+      // Clear any existing test flights first
+      final existingFlights = await _authService.loadFlights();
+      for (final f in existingFlights) {
+        if (f['id'] != null) {
+          await _authService.deleteFlight(f['id']);
+        }
+      }
+      final now = DateTime.now();
+      await _authService.saveFlight({
+        'flightNumber': '2892',
+        'fullFlightNumber': 'VS2892',
+        'carrierFsCode': 'VS',
+        'originAirport': 'LHR',
+        'destinationAirport': 'JFK',
+        'originCity': 'London',
+        'destinationCity': 'New York',
+        'originAirportName': 'Heathrow',
+        'destinationAirportName': 'John F. Kennedy International',
+        'departureTime': now.subtract(const Duration(hours: 1)).toIso8601String(),
+        'arrivalTime': now.add(const Duration(hours: 6)).toIso8601String(),
+        'departureTerminal': '3',
+        'arrivalTerminal': '4',
+        'gate': '37',
+        'delayMinutes': 0,
+        'stops': 0,
+        'isCodeshare': false,
+        'isWetlease': false,
+        'serviceClasses': <String>['J'],
+        'trafficRestrictions': <String>[],
+        'airlineName': 'Virgin Atlantic',
+      });
+      debugPrint('[Airtime] TEST: Added test in-flight VS2892 (LHR→JFK)');
+      await _loadTrips();
+    }
+
     // Start live tracking notifications for eligible flights
     _startFlightTrackingForTrips();
   }
@@ -386,6 +427,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         final fullFlightNumber = data['fullFlightNumber'] ?? '${data['carrierFsCode']}${data['flightNumber']}';
         final transportName = '$airlineName $fullFlightNumber';
 
+        final storedDelay = data['delayMinutes'] as int? ?? 0;
         loadedTrips.add(Trip(
           type: TripType.flight,
           id: data['id'] ?? '',
@@ -394,10 +436,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           originCity: data['originCity'] ?? data['originAirport'] ?? '',
           destinationCity: data['destinationCity'] ?? data['destinationAirport'] ?? '',
           transportName: transportName,
-          isDelayed: false, // Will be updated by delay check
+          isDelayed: storedDelay > 0,
+          delayMinutes: storedDelay > 0 ? storedDelay : null,
           flight: flight,
           appendix: appendix,
           firestoreId: data['id'] as String?,
+          gate: data['gate'] as String?,
+          baggageBelt: data['baggageBelt'] as String?,
         ));
       }
 
@@ -451,6 +496,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   flight: trip.flight,
                   appendix: trip.appendix,
                   firestoreId: trip.firestoreId,
+                  gate: trip.gate,
                 );
               });
             }
@@ -484,6 +530,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               arrivalTerminal: t.flight?.arrivalTerminal,
               originAirport: t.flight?.departureAirportFsCode,
               destinationAirport: t.flight?.arrivalAirportFsCode,
+              gate: t.gate,
+              delayMinutes: t.delayMinutes,
+              baggageBelt: t.baggageBelt,
             ))
         .toList();
 

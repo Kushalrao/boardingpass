@@ -23,9 +23,11 @@ class FlightTrackingData {
   final String? departureTerminal;
   final String? arrivalTerminal;
   final String? gate;
+  final int? delayMinutes;
   // iOS Live Activity needs airport codes
   final String? originAirport;
   final String? destinationAirport;
+  final String? baggageBelt;
 
   FlightTrackingData({
     required this.firestoreId,
@@ -37,8 +39,10 @@ class FlightTrackingData {
     this.departureTerminal,
     this.arrivalTerminal,
     this.gate,
+    this.delayMinutes,
     this.originAirport,
     this.destinationAirport,
+    this.baggageBelt,
   });
 }
 
@@ -260,7 +264,7 @@ class FlightTrackingForegroundService {
     // Generate unique notification ID from Firestore doc ID (avoid collision with service ID 900)
     final notificationId = data.firestoreId.hashCode.abs() % 90000 + 10000;
 
-    _trackedFlights[data.firestoreId] = _TrackedFlight(
+    final tf = _TrackedFlight(
       flightNumber: data.flightNumber,
       originCity: data.originCity,
       destinationCity: data.destinationCity,
@@ -273,6 +277,13 @@ class FlightTrackingForegroundService {
       originAirport: data.originAirport,
       destinationAirport: data.destinationAirport,
     );
+    if (data.delayMinutes != null && data.delayMinutes! > 0) {
+      tf.delayMinutes = data.delayMinutes;
+    }
+    if (data.baggageBelt != null) {
+      tf.baggageBelt = data.baggageBelt;
+    }
+    _trackedFlights[data.firestoreId] = tf;
 
     debugPrint(
         '[FlightTracking] Now tracking ${data.flightNumber} (id: ${data.firestoreId}, notifId: $notificationId)');
@@ -435,6 +446,17 @@ class FlightTrackingForegroundService {
           : 'Scheduled';
     }
 
+    final scheduledDeparture = tracked.departureDateTime;
+    final scheduledArrival = tracked.arrivalDateTime ??
+        tracked.departureDateTime.add(const Duration(hours: 2));
+    final delay = tracked.delayMinutes ?? 0;
+    final estimatedDeparture = delay > 0
+        ? scheduledDeparture.add(Duration(minutes: delay))
+        : scheduledDeparture;
+    final estimatedArrival = delay > 0
+        ? scheduledArrival.add(Duration(minutes: delay))
+        : scheduledArrival;
+
     return {
       'flightId': flightId,
       'flightNumber': tracked.flightNumber,
@@ -442,16 +464,16 @@ class FlightTrackingForegroundService {
       'destinationCity': tracked.destinationCity,
       'originAirport': tracked.originAirport ?? tracked.originCity,
       'destinationAirport': tracked.destinationAirport ?? tracked.destinationCity,
-      'scheduledDeparture': tracked.departureDateTime.millisecondsSinceEpoch.toDouble(),
-      'scheduledArrival': (tracked.arrivalDateTime ?? tracked.departureDateTime.add(const Duration(hours: 2))).millisecondsSinceEpoch.toDouble(),
+      'scheduledDeparture': scheduledDeparture.millisecondsSinceEpoch.toDouble(),
+      'scheduledArrival': scheduledArrival.millisecondsSinceEpoch.toDouble(),
       'status': status,
       'departureGate': tracked.gate,
-      'arrivalGate': tracked.arrivalTerminal != null ? null : null, // No arrival gate from current data
+      'arrivalGate': tracked.arrivalTerminal != null ? null : null,
       'departureTerminal': tracked.departureTerminal,
       'arrivalTerminal': tracked.arrivalTerminal,
-      'estimatedDeparture': tracked.departureDateTime.millisecondsSinceEpoch.toDouble(),
-      'estimatedArrival': (tracked.arrivalDateTime ?? tracked.departureDateTime.add(const Duration(hours: 2))).millisecondsSinceEpoch.toDouble(),
-      'delayMinutes': tracked.delayMinutes ?? 0,
+      'estimatedDeparture': estimatedDeparture.millisecondsSinceEpoch.toDouble(),
+      'estimatedArrival': estimatedArrival.millisecondsSinceEpoch.toDouble(),
+      'delayMinutes': delay,
       'progress': progress,
       'baggageBelt': tracked.baggageBelt,
       'diversionAirport': tracked.diversionAirport,

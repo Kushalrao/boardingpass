@@ -1015,43 +1015,146 @@ struct FlightTrackingAttributes: ActivityAttributes {
 }
 ```
 
-### Lock Screen View Design
+### Lock Screen View Design (Updated Feb 2026)
 
+White background with colored pill-based design. Two layout variants:
+
+**StandardLayout** (Scheduled / Boarding / Cancelled / Diverted):
 ```
 ┌──────────────────────────────────────────┐
-│  LX147                         On Time   │
-│  DEL → ZRH                              │
-│  ●━━━━━━━━━━━━✈━━━━━━━━━━━━●            │
-│  01:45 AM              06:20 AM          │
-│  Delhi                    Zurich         │
-│  Gate T3 · Terminal 3                    │
+│  ┌─────────┐  Your flight is on time     │
+│  │  02:40  │  ✈ LH 2738                 │
+│  └─────────┘                             │
+│  ┌─SFO─●━━━━━━━━━━━━━━━━━━━━━━━JFK──┐   │
+│  └───────────────────────────────────┘   │
+│  [T3] [37]            Arrival at 03:20   │
 └──────────────────────────────────────────┘
 ```
 
-- Black tinted background, white text
-- Flight number (bold) + status (color-coded: green/orange/red)
-- Airport code route with arrow
-- Progress bar with green fill + airplane icon + endpoint dots
-- Departure/arrival times (monospaced) with city names
-- Bottom: gate + terminal + baggage info via SF Symbol labels
+**StandardLayout — Delayed Departure:**
+```
+┌──────────────────────────────────────────┐
+│  ┌──────────────┐  Flight delayed        │
+│  │  02:40 03:25 │  ✈ AI 2849            │
+│  └──────────────┘                        │
+│  ┌─DEL─●━━━━━━━━━━━━━━━━━━━━━━BOM──┐    │
+│  └──────────────────────────────────┘    │
+│  [T3] [14]            Arrival at 05:25   │
+└──────────────────────────────────────────┘
+```
+- Time pill: dark gradient (#9a044b→#510228) with #ff4600 5px border
+- Scheduled time shown struck through, estimated time shown next to it
+- Title changes to "Flight delayed"
+- Progress bar/dot uses #ff4600 (red-orange) instead of green
+
+**ArrivedLayout** (In Flight + Landed):
+```
+┌──────────────────────────────────────────┐
+│  Arrival in New York       ┌─────────┐   │
+│  ✈ LH 2738                │  19:40  │   │
+│                            └─────────┘   │
+│  ┌─SFO─━━━━━━━━━━━━━━━━━━━━━━━JFK──┐   │
+│  └───────────────────────────────────┘   │
+│                  Baggage belt number [37] │  ← only if baggage belt available
+│                                     [T1] │  ← arrival terminal pill (right-aligned)
+└──────────────────────────────────────────┘
+```
+
+**ArrivedLayout — Delayed Arrival (In Flight):**
+```
+┌──────────────────────────────────────────┐
+│  Arriving late             ┌──────────┐  │
+│  ✈ AI 2849                │ 19:40 20:25│ │
+│                            └──────────┘  │
+│  ┌─DEL─━━━━━━━━━━━━━━━━━━━━━━BOM──┐     │
+│  └─────────────────────────────────┘     │
+│                  Baggage belt number [37] │
+│                                     [T2] │
+└──────────────────────────────────────────┘
+```
+- Title changes to "Arriving late" when delayed
+- Arrival time pill uses same dark gradient + red border as departure delay pill
+- Scheduled arrival shown struck through, estimated arrival next to it
+- Progress bar uses #ff4600 (red-orange) instead of green
+
+- Switches to ArrivedLayout after takeoff (status "In Flight" or "Landed")
+- Arrival time pill is delay-aware (dark gradient with red border when delayed, blue when on time)
+- Progress bar auto-animates during flight, shows full green (or red-orange if delayed) when landed
+- Bottom row: baggage belt info (only when available) + arrival terminal pill (right-aligned)
+- When neither baggage nor terminal available, bottom row is empty
+
+**Design tokens (from Figma):**
+- Time pill: `#016be5` bg, `#cdf9da` text, 29px heavy rounded, 17px corner radius
+- Terminal pill: `#ffe605` bg, `#6d590b` text, 19px heavy rounded, capsule
+- Gate pill: `#ffcc00` bg, `#6d590b` text, 19px heavy rounded, capsule
+- Baggage pill: `#ffff00` bg, `#6d590b` text, suitcase.fill icon
+- Route capsule: `#f5f5f0` bg, airport codes 15px semibold `rgba(0,0,0,0.62)`
+- Progress: `#09c842` green (dot for pre-departure, bar for in-flight, full for arrived)
+- Delay time pill gradient: `#9a044b` → `#510228` (dark magenta gradient, left to right)
+- Delay time pill border: `#ff4600` (red-orange), 5px stroke
+- Delay time pill text: `#ffeae2` (light pink)
+- Delay progress: `#ff4600` (red-orange, replaces green for dot/bar)
+- Title: 21px bold, airline badge at 72% opacity
+- Time format: 24h (HH:mm)
+- Fonts: System (SF Pro) for body, SF Rounded Heavy for pills (Figma: Figtree → system, Hauss → rounded)
+
+**Airline logos:**
+- Bundled as image assets in `ios/FlightTrackingWidget/Assets.xcassets/` (widget extension's own asset catalog)
+- 51 top airlines by IATA code: AA, AC, AF, AI, AK, AM, AS, AY, AZ, BA, BR, CA, CI, CX, CZ, DL, EK, ET, EY, FI, FR, GA, HA, HU, IB, JL, KA, KE, KL, LH, LX, MH, MU, NH, NZ, OS, OZ, PG, QF, QR, RJ, SA, SK, SQ, SU, SV, TG, TK, UA, VS, WN
+- Each imageset has 2x (40x40) and 3x (60x60) PNGs, sourced from pics.avs.io
+- `AirlineBadge` component: tries `UIImage(named: carrierCode)` first, falls back to grey rounded rectangle with carrier code text for unknown airlines
+- Carrier code extracted from `flightNumber.prefix(2).uppercased()`
+
+**Progress bar:**
+- Green dot for pre-departure (progress=0), green capsule bar for in-flight (0-100%), full green bar for arrived (progress=100)
+- In-flight progress uses `ProgressView(timerInterval: departure...arrival, countsDown: false)` — auto-animates on-device without needing server pushes
+- Falls back to static capsule bar when departure/arrival dates are unavailable or progress is 0 or 100
+- Progress value initially calculated from elapsed/total flight time in `_buildLiveActivityParams()`, updated via FCM events or APNs push
+
+**Delay data pipeline (Dart → Swift):**
+- `delayMinutes` stored in Firestore on flight document
+- Loaded in `_loadTrips()`: `data['delayMinutes'] as int? ?? 0`
+- Passed through: Trip.delayMinutes → FlightTrackingData.delayMinutes → `_TrackedFlight.delayMinutes`
+- In `_buildLiveActivityParams()`: `estimatedDeparture = scheduledDeparture + delayMinutes`, `estimatedArrival = scheduledArrival + delayMinutes`
+- Swift side: `isDelayed` computed as `estimatedDeparture != scheduledDeparture || estimatedArrival != scheduledArrival`
+- When delayed: `DelayTimePill` replaces standard blue time pill (dark gradient + red border + struck-through scheduled time + estimated time)
+- `RoutePill` receives `isDelayed` param → switches progress color from green (`#09c842`) to red-orange (`#ff4600`)
+
+**DelayTimePill component (Swift):**
+- Shows: `[scheduled̶ ̶t̶i̶m̶e̶] [estimated time]` in dark gradient pill
+- Scheduled time: 19px medium rounded, struck through
+- Estimated time: 29px heavy rounded
+- Background: LinearGradient `#9a044b` → `#510228`
+- Border: `#ff4600`, 5px, 17px corner radius
+- Text color: `#ffeae2`
+
+**Gate pipeline (Dart → Swift):**
+- Gate stored in Firestore as `gate` field on flight document
+- Trip class has `gate` property, populated from Firestore data in `_loadTrips()`
+- Passed through: Trip.gate → FlightTrackingData.gate → `_buildLiveActivityParams()` → `departureGate` → Swift ContentState
 
 ### Dynamic Island Presentations
 
-**Compact:** Leading = SF Symbol (airplane.departure/airplane/airplane.arrival), Trailing = `Text(estimatedArrival, style: .timer)` auto-updating countdown
+**Compact:** Leading = circular progress ring with airplane icon (status-colored), Trailing = destination airport code
 
-**Expanded:** 4 regions — Leading: origin airport+city+time, Trailing: destination airport+city+time, Center: flight number, Bottom: progress bar + status + gate
+**Expanded:** Leading: flight number, Trailing: gate pill (or "AIRTIME" branding), Bottom: airport codes + times + progress capsule (auto-animated via ProgressView for in-flight) + status text
 
-**Minimal:** Airplane SF Symbol with status color
+**Minimal:** Circular progress ring with airplane icon (status-colored)
 
-### Status Color Coding (SwiftUI)
+### Status Color Coding (Lock Screen pills)
 
-```swift
-switch state.status {
-    case "Cancelled": .red
-    case "Diverted":  .orange
-    default:          state.delayMinutes > 0 ? .orange : .green
-}
-```
+| Status | Pill background | Pill text | Title text |
+|--------|----------------|-----------|------------|
+| On Time | `#016be5` (blue) | `#cdf9da` | "Your flight is on time" |
+| Delayed (pre-flight) | `#9a044b→#510228` gradient | `#ffeae2` | "Flight delayed" (uses DelayTimePill with struck-through scheduled + estimated time) |
+| Delayed (in-flight) | `#9a044b→#510228` gradient | `#ffeae2` | "Arriving late" (ArrivedLayout, uses DelayTimePill for arrival time) |
+| Cancelled | `.red` | `.white` | "Flight cancelled" |
+| Diverted | `#ff4600` (orange) | `#ffeae2` | "Diverted to {airport}" |
+| Boarding | `#016be5` (blue) | `#cdf9da` | "Boarding now" |
+| In Flight | `#016be5` (blue) | `#cdf9da` | "Arrival in {city}" (ArrivedLayout) |
+| Landed | `#016be5` (blue) | `#cdf9da` | "Arrival in {city}" (ArrivedLayout) |
+
+Dynamic Island uses: `.red` (cancelled), `.orange` (diverted/delayed), `#09c842` green (normal)
 
 ### Push Token Flow (Background Updates)
 

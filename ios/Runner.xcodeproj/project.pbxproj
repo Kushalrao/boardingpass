@@ -22,6 +22,7 @@
 		BB00000300000000000000B3 /* FlightTrackingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000200000000000000A2 /* FlightTrackingAttributes.swift */; };
 		BB00000400000000000000B4 /* FlightActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000300000000000000A3 /* FlightActivityWidget.swift */; };
 		BB00000500000000000000B5 /* FlightTrackingWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = AA00000400000000000000A4 /* FlightTrackingWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		BB00000600000000000000B6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA00000800000000000000A8 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +98,7 @@
 		AA00000500000000000000A5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA00000600000000000000A6 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		AA00000700000000000000A7 /* FlightTrackingWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FlightTrackingWidgetExtension.entitlements; sourceTree = "<group>"; };
+		AA00000800000000000000A8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -212,6 +214,7 @@
 		DD00000100000000000000D1 /* FlightTrackingWidget */ = {
 			isa = PBXGroup;
 			children = (
+				AA00000800000000000000A8 /* Assets.xcassets */,
 				AA00000200000000000000A2 /* FlightTrackingAttributes.swift */,
 				AA00000300000000000000A3 /* FlightActivityWidget.swift */,
 				AA00000500000000000000A5 /* Info.plist */,
@@ -351,6 +354,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BB00000600000000000000B6 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -2,15 +2,69 @@ import ActivityKit
 import SwiftUI
 import WidgetKit
 
-// MARK: - Banner Config
+// MARK: - Design Tokens
 
 @available(iOS 16.2, *)
-struct BannerConfig {
-    let icon: String
-    let text: String
-    let detail: String
-    let backgroundColor: Color
-    let foregroundColor: Color
+private enum C {
+    // Blue pill (departure time / arrival time)
+    static let bluePill = Color(red: 1/255, green: 107/255, blue: 229/255)         // #016be5
+    static let bluePillText = Color(red: 205/255, green: 249/255, blue: 218/255)   // #cdf9da
+
+    // Yellow pills (terminal & gate)
+    static let yellowTerminal = Color(red: 255/255, green: 230/255, blue: 5/255)   // #ffe605
+    static let yellowGate = Color(red: 255/255, green: 204/255, blue: 0)           // #ffcc00
+    static let yellowPillText = Color(red: 109/255, green: 89/255, blue: 11/255)   // #6d590b
+
+    // Delayed yellow pill
+    static let delayPill = Color(red: 255/255, green: 230/255, blue: 5/255)        // #ffe605
+    static let delayPillText = Color(red: 135/255, green: 110/255, blue: 12/255)   // #876e0c
+
+    // Orange alert (gate change / diversion)
+    static let orangePill = Color(red: 255/255, green: 70/255, blue: 0)            // #ff4600
+    static let orangePillText = Color(red: 255/255, green: 234/255, blue: 226/255) // #ffeae2
+
+    // Progress & route
+    static let greenProgress = Color(red: 9/255, green: 200/255, blue: 66/255)     // #09c842
+    static let routeBg = Color(red: 245/255, green: 245/255, blue: 240/255)        // #f5f5f0
+    static let subtitleColor = Color.black.opacity(0.62)
+
+    // Delay pill (dark gradient with red border)
+    static let delayGradientStart = Color(red: 154/255, green: 4/255, blue: 75/255)   // #9a044b
+    static let delayGradientEnd = Color(red: 81/255, green: 2/255, blue: 40/255)      // #510228
+    static let delayBorder = Color(red: 255/255, green: 70/255, blue: 0)              // #ff4600
+    static let delayPillTextLight = Color(red: 255/255, green: 234/255, blue: 226/255) // #ffeae2
+    static let delayProgress = Color(red: 255/255, green: 70/255, blue: 0)            // #ff4600
+
+    // Baggage (CSS yellow per Figma)
+    static let baggageYellow = Color(red: 1.0, green: 1.0, blue: 0)         // #ffff00
+}
+
+// MARK: - Helpers
+
+@available(iOS 16.2, *)
+private func formatTime24(_ date: Date) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm"
+    return f.string(from: date)
+}
+
+@available(iOS 16.2, *)
+private func formatFlightNumber(_ raw: String) -> String {
+    // "LH2738" → "LH 2738"
+    guard let firstDigitIndex = raw.firstIndex(where: { $0.isNumber }) else { return raw }
+    if firstDigitIndex == raw.startIndex { return raw }
+    let code = raw[raw.startIndex..<firstDigitIndex]
+    let number = raw[firstDigitIndex...]
+    return "\(code) \(number)"
+}
+
+@available(iOS 16.2, *)
+private func formatDuration(_ minutes: Int) -> String {
+    if minutes <= 0 { return "" }
+    if minutes < 60 { return "\(minutes)m" }
+    let h = minutes / 60
+    let m = minutes % 60
+    return m == 0 ? "\(h)h" : "\(h)h \(m)m"
 }
 
 // MARK: - Main Widget
@@ -19,7 +73,6 @@ struct BannerConfig {
 struct FlightActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: FlightTrackingAttributes.self) { context in
-            // LOCK SCREEN / STANDBY presentation
             ZStack {
                 Color.white
                 FlightLockScreenView(
@@ -31,34 +84,29 @@ struct FlightActivityWidget: Widget {
             .activitySystemActionForegroundColor(.black)
         } dynamicIsland: { context in
             DynamicIsland {
-                // EXPANDED Dynamic Island
+                // EXPANDED
                 DynamicIslandExpandedRegion(.leading) {
                     Text(context.attributes.flightNumber)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 14, weight: .bold))
                         .foregroundColor(.white.opacity(0.8))
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     if let gate = context.state.departureGate {
-                        HStack(spacing: 3) {
-                            Image(systemName: "figure.walk")
-                                .font(.system(size: 10, weight: .medium))
-                            Text(gate)
-                                .font(.system(size: 12, weight: .bold))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.white.opacity(0.15))
-                        .foregroundColor(.white)
-                        .cornerRadius(5)
+                        Text(gate)
+                            .font(.system(size: 12, weight: .heavy, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(C.yellowGate)
+                            .foregroundColor(C.yellowPillText)
+                            .cornerRadius(8)
                     } else {
                         HStack(spacing: 4) {
                             Image(systemName: "airplane")
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(.white.opacity(0.6))
                             Text("AIRTIME")
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(.white.opacity(0.6))
                         }
+                        .foregroundColor(.white.opacity(0.6))
                     }
                 }
                 DynamicIslandExpandedRegion(.center) {
@@ -66,358 +114,196 @@ struct FlightActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 6) {
-                        // Main flight row
+                        // Flight route row
                         HStack(spacing: 0) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(context.attributes.originAirport)
                                     .font(.system(size: 20, weight: .bold))
                                     .foregroundColor(.white)
-                                Text(Self.formatTime(date: context.state.estimatedDeparture))
+                                Text(formatTime24(context.state.estimatedDeparture))
                                     .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(Self.timeColor(state: context.state, forDeparture: true))
+                                    .foregroundColor(diTimeColor(context.state, forDeparture: true))
                             }
                             .fixedSize()
 
-                            InlineFlightPathView(
-                                progress: context.state.progress,
-                                lightBackground: false
-                            )
-                            .padding(.horizontal, 4)
+                            // Progress capsule
+                            if context.state.progress > 0
+                                && context.state.progress < 100
+                                && context.state.estimatedArrival > context.state.estimatedDeparture
+                            {
+                                ProgressView(
+                                    timerInterval: context.state.estimatedDeparture...context.state.estimatedArrival,
+                                    countsDown: false
+                                ) { EmptyView() } currentValueLabel: { EmptyView() }
+                                .progressViewStyle(.linear)
+                                .tint(C.greenProgress)
+                                .scaleEffect(y: 2.0, anchor: .center)
+                                .frame(height: 8)
+                                .clipShape(Capsule())
+                                .padding(.horizontal, 8)
+                            } else {
+                                GeometryReader { geo in
+                                    let w = geo.size.width
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(Color.white.opacity(0.15))
+                                            .frame(height: 8)
+                                        Capsule()
+                                            .fill(C.greenProgress)
+                                            .frame(width: max(8, w * CGFloat(context.state.progress) / 100.0), height: 8)
+                                    }
+                                    .frame(maxHeight: .infinity)
+                                }
+                                .padding(.horizontal, 8)
+                            }
 
                             VStack(alignment: .trailing, spacing: 1) {
                                 Text(context.attributes.destinationAirport)
                                     .font(.system(size: 20, weight: .bold))
                                     .foregroundColor(.white)
-                                Text(Self.formatTime(date: context.state.estimatedArrival))
+                                Text(formatTime24(context.state.estimatedArrival))
                                     .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(Self.timeColor(state: context.state, forDeparture: false))
+                                    .foregroundColor(diTimeColor(context.state, forDeparture: false))
                             }
                             .fixedSize()
                         }
 
-                        // Status banner
-                        let banner = Self.bannerConfig(attributes: context.attributes, state: context.state)
+                        // Status row
                         HStack {
-                            HStack(spacing: 4) {
-                                Image(systemName: banner.icon)
-                                    .font(.system(size: 10, weight: .bold))
-                                Text(banner.text)
-                                    .font(.system(size: 11, weight: .bold))
-                            }
+                            Text(diStatusText(context.state))
+                                .font(.system(size: 11, weight: .bold))
                             Spacer()
-                            if !banner.detail.isEmpty {
-                                Text(banner.detail)
-                                    .font(.system(size: 10, weight: .medium))
+                            if context.state.status == "In Flight" {
+                                let minutes = Int(context.state.estimatedArrival.timeIntervalSinceNow / 60)
+                                if minutes > 0 {
+                                    Text(formatDuration(minutes))
+                                        .font(.system(size: 10, weight: .medium))
+                                }
                             }
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(banner.backgroundColor.opacity(0.85))
-                        .foregroundColor(banner.foregroundColor)
-                        .cornerRadius(8)
+                        .foregroundColor(.white.opacity(0.7))
                     }
                     .padding(.top, 4)
                 }
             } compactLeading: {
-                // Circular progress with airplane
-                ZStack {
-                    Circle()
-                        .stroke(Color.white.opacity(0.2), lineWidth: 2)
-                        .frame(width: 20, height: 20)
-                    Circle()
-                        .trim(from: 0, to: CGFloat(context.state.progress) / 100.0)
-                        .stroke(Self.statusColor(context.state), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                        .frame(width: 20, height: 20)
-                        .rotationEffect(.degrees(-90))
-                    Image(systemName: "airplane")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Self.statusColor(context.state))
-                }
+                // Leading: always just the airport code
+                let st = context.state
+                let attr = context.attributes
+                Text(st.status == "Landed" ? attr.destinationAirport : attr.originAirport)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white.opacity(0.62))
+                    .tracking(0.45)
             } compactTrailing: {
-                Text("To \(context.attributes.destinationAirport)")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: 60)
+                // Trailing: contextual pill (priority: landed→belt, delay→time, gate, terminal, countdown)
+                let st = context.state
+                let attr = context.attributes
+                if st.status == "Landed" {
+                    if let belt = st.baggageBelt, !belt.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "suitcase.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text(belt)
+                                .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        }
+                        .foregroundColor(C.yellowPillText)
+                        .padding(.horizontal, 7)
+                        .frame(height: 25)
+                        .background(C.baggageYellow)
+                        .clipShape(Capsule())
+                    }
+                } else if st.delayMinutes > 0 {
+                    Text(formatTime24(st.estimatedDeparture))
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        .foregroundColor(C.delayPillTextLight)
+                        .padding(.horizontal, 7)
+                        .frame(height: 25)
+                        .background(
+                            LinearGradient(
+                                colors: [C.delayGradientStart, C.delayGradientEnd],
+                                startPoint: .leading, endPoint: .trailing
+                            )
+                        )
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(C.delayBorder, lineWidth: 2))
+                } else if let gate = st.departureGate, !gate.isEmpty {
+                    Text(gate)
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        .foregroundColor(C.yellowPillText)
+                        .padding(.horizontal, 7)
+                        .frame(height: 25)
+                        .background(C.yellowGate)
+                        .clipShape(Capsule())
+                } else if let terminal = st.departureTerminal, !terminal.isEmpty {
+                    Text("T\(terminal)")
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        .foregroundColor(C.yellowPillText)
+                        .padding(.horizontal, 7)
+                        .frame(height: 25)
+                        .background(C.yellowTerminal)
+                        .clipShape(Capsule())
+                } else {
+                    let arrival = st.estimatedArrival
+                    let now = Date()
+                    let remaining = arrival.timeIntervalSince(now)
+                    if remaining > 0 {
+                        let hours = Int(remaining) / 3600
+                        let minutes = (Int(remaining) % 3600) / 60
+                        let label = hours > 0 ? "\(hours) H" : "\(minutes) M"
+                        Text(label)
+                            .font(.system(size: 15, weight: .heavy, design: .rounded))
+                            .foregroundColor(C.bluePillText)
+                            .padding(.horizontal, 7)
+                            .frame(height: 25)
+                            .background(C.bluePill)
+                            .clipShape(Capsule())
+                    }
+                }
             } minimal: {
                 ZStack {
                     Circle()
                         .trim(from: 0, to: CGFloat(context.state.progress) / 100.0)
-                        .stroke(Self.statusColor(context.state), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .stroke(diStatusColor(context.state), style: StrokeStyle(lineWidth: 2, lineCap: .round))
                         .frame(width: 20, height: 20)
                         .rotationEffect(.degrees(-90))
                     Image(systemName: "airplane")
                         .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Self.statusColor(context.state))
+                        .foregroundColor(diStatusColor(context.state))
                 }
             }
         }
     }
 
-    // MARK: - Time Formatting
+    // MARK: - Dynamic Island Helpers
 
-    static func formatTime(date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mma"
-        formatter.amSymbol = "AM"
-        formatter.pmSymbol = "PM"
-        return formatter.string(from: date)
-    }
-
-    // MARK: - Color Helpers
-
-    static func timeColor(state: FlightTrackingAttributes.ContentState, forDeparture: Bool, lightBackground: Bool = false) -> Color {
+    private func diStatusColor(_ state: FlightTrackingAttributes.ContentState) -> Color {
         switch state.status {
-        case "Cancelled":
-            return .red
-        case "Diverted":
-            return .orange
-        case "Delayed":
-            return forDeparture ? .orange : .green
-        default:
-            if state.delayMinutes > 0 && forDeparture {
-                return .orange
-            }
-            return .green
+        case "Cancelled": return .red
+        case "Diverted": return .orange
+        default: return state.delayMinutes > 0 ? .orange : C.greenProgress
         }
     }
 
-    static func statusColor(_ state: FlightTrackingAttributes.ContentState) -> Color {
+    private func diTimeColor(_ state: FlightTrackingAttributes.ContentState, forDeparture: Bool) -> Color {
         switch state.status {
-        case "Cancelled":
-            return .red
-        case "Diverted":
-            return .orange
+        case "Cancelled": return .red
+        case "Diverted": return .orange
         default:
-            if state.delayMinutes > 0 {
-                return .orange
-            }
-            return .green
+            if state.delayMinutes > 0 && forDeparture { return .orange }
+            return C.greenProgress
         }
     }
 
-    // MARK: - Status Text Helpers
-
-    static func departureStatusText(_ state: FlightTrackingAttributes.ContentState) -> String {
+    private func diStatusText(_ state: FlightTrackingAttributes.ContentState) -> String {
         switch state.status {
-        case "Cancelled":
-            return "Cancelled"
-        case "Diverted":
-            return "Diverted"
-        case "Delayed":
-            return "Delayed \(state.delayMinutes)m"
+        case "Cancelled": return "Cancelled"
+        case "Diverted": return "Diverted"
+        case "Landed": return "Landed"
+        case "In Flight": return "In Flight"
+        case "Delayed": return "Delayed \(state.delayMinutes)m"
         default:
-            if state.delayMinutes > 0 {
-                return "Delayed \(state.delayMinutes)m"
-            }
+            if state.delayMinutes > 0 { return "Delayed \(state.delayMinutes)m" }
             return "On Time"
         }
-    }
-
-    static func arrivalStatusText(_ state: FlightTrackingAttributes.ContentState) -> String {
-        switch state.status {
-        case "Cancelled":
-            return "Cancelled"
-        case "Diverted":
-            if let airport = state.diversionAirport {
-                return "→ \(airport)"
-            }
-            return "Diverted"
-        case "Landed":
-            return "Landed"
-        default:
-            return "On Time"
-        }
-    }
-
-    static func arrivalStatusColor(_ state: FlightTrackingAttributes.ContentState) -> Color {
-        switch state.status {
-        case "Cancelled":
-            return .red
-        case "Diverted":
-            return .orange
-        case "Landed":
-            return .blue
-        default:
-            return .green
-        }
-    }
-
-    // MARK: - Banner Config
-
-    static func bannerConfig(attributes: FlightTrackingAttributes, state: FlightTrackingAttributes.ContentState) -> BannerConfig {
-        switch state.status {
-        case "Cancelled":
-            return BannerConfig(
-                icon: "xmark.octagon.fill",
-                text: "Cancelled",
-                detail: "",
-                backgroundColor: .red,
-                foregroundColor: .white
-            )
-
-        case "Diverted":
-            let dest = state.diversionAirport ?? "Unknown"
-            return BannerConfig(
-                icon: "exclamationmark.triangle.fill",
-                text: "Diverted to \(dest)",
-                detail: "",
-                backgroundColor: .orange,
-                foregroundColor: .black
-            )
-
-        case "Landed":
-            let beltText = state.baggageBelt.map { "Baggage Belt \($0)" } ?? "Arrived"
-            return BannerConfig(
-                icon: "airplane.arrival",
-                text: "Landed",
-                detail: beltText,
-                backgroundColor: .blue,
-                foregroundColor: .white
-            )
-
-        case "In Flight":
-            let minutes = Int(state.estimatedArrival.timeIntervalSinceNow / 60)
-            let landingText: String
-            if minutes <= 0 {
-                landingText = "Landing now"
-            } else if minutes < 60 {
-                landingText = "Landing in \(minutes)m"
-            } else {
-                let h = minutes / 60
-                let m = minutes % 60
-                landingText = m == 0 ? "Landing in \(h)h" : "Landing in \(h)h \(m)m"
-            }
-            return BannerConfig(
-                icon: "airplane",
-                text: "In Flight",
-                detail: landingText,
-                backgroundColor: .green,
-                foregroundColor: .white
-            )
-
-        case "Boarding":
-            let gateText = state.departureGate.map { "Gate \($0)" } ?? "Boarding"
-            return BannerConfig(
-                icon: "figure.walk",
-                text: gateText,
-                detail: "Boarding",
-                backgroundColor: Color(red: 1.0, green: 0.8, blue: 0.0),
-                foregroundColor: .black
-            )
-
-        case "Delayed":
-            let newTime = formatTime(date: state.estimatedDeparture)
-            return BannerConfig(
-                icon: "clock.fill",
-                text: "Delayed \(state.delayMinutes) min",
-                detail: "New departure \(newTime)",
-                backgroundColor: .orange,
-                foregroundColor: .black
-            )
-
-        default: // "Scheduled" or unknown
-            if state.delayMinutes > 0 {
-                let newTime = formatTime(date: state.estimatedDeparture)
-                return BannerConfig(
-                    icon: "clock.fill",
-                    text: "Delayed \(state.delayMinutes) min",
-                    detail: "New departure \(newTime)",
-                    backgroundColor: .orange,
-                    foregroundColor: .black
-                )
-            } else if let gate = state.departureGate {
-                let minutesToDep = Int(state.estimatedDeparture.timeIntervalSinceNow / 60)
-                let timeText: String
-                if minutesToDep <= 0 {
-                    timeText = "Departing now"
-                } else if minutesToDep < 60 {
-                    timeText = "Gate Departure in \(minutesToDep)m"
-                } else {
-                    let h = minutesToDep / 60
-                    let m = minutesToDep % 60
-                    timeText = m == 0 ? "Gate Departure in \(h)h" : "Gate Departure in \(h)h \(m)m"
-                }
-                return BannerConfig(
-                    icon: "airplane.departure",
-                    text: "Gate \(gate)",
-                    detail: timeText,
-                    backgroundColor: Color(red: 1.0, green: 0.8, blue: 0.0),
-                    foregroundColor: .black
-                )
-            } else {
-                let minutesToDep = Int(state.estimatedDeparture.timeIntervalSinceNow / 60)
-                let timeText: String
-                if minutesToDep <= 0 {
-                    timeText = "Departing now"
-                } else if minutesToDep < 60 {
-                    timeText = "Departure in \(minutesToDep)m"
-                } else {
-                    let h = minutesToDep / 60
-                    let m = minutesToDep % 60
-                    timeText = m == 0 ? "Departure in \(h)h" : "Departure in \(h)h \(m)m"
-                }
-                return BannerConfig(
-                    icon: "airplane.departure",
-                    text: "Scheduled",
-                    detail: timeText,
-                    backgroundColor: Color(.systemGray5),
-                    foregroundColor: .black.opacity(0.7)
-                )
-            }
-        }
-    }
-}
-
-// MARK: - Inline Flight Path (dots + airplane)
-
-@available(iOS 16.2, *)
-struct InlineFlightPathView: View {
-    let progress: Int
-    var lightBackground: Bool = false
-
-    private var dotColor: Color { lightBackground ? .black.opacity(0.2) : .white.opacity(0.3) }
-    private var activeColor: Color { .green }
-    private var planeColor: Color { lightBackground ? .black : .white }
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let centerY = h / 2
-            let pct = CGFloat(progress) / 100.0
-            let margin: CGFloat = 6
-            let pathStart = margin
-            let pathEnd = w - margin
-            let pathWidth = pathEnd - pathStart
-            let planeX = pathStart + pct * pathWidth
-
-            // Dots
-            let dotSpacing: CGFloat = 7
-            let dotRadius: CGFloat = 1.5
-            let dotCount = max(1, Int(pathWidth / dotSpacing))
-
-            Canvas { ctx, size in
-                for i in 0..<dotCount {
-                    let x = pathStart + CGFloat(i) * dotSpacing
-                    let isBehind = x < planeX - 8
-                    let color = isBehind ? activeColor : dotColor
-                    let rect = CGRect(
-                        x: x - dotRadius,
-                        y: centerY - dotRadius,
-                        width: dotRadius * 2,
-                        height: dotRadius * 2
-                    )
-                    ctx.fill(Circle().path(in: rect), with: .color(color))
-                }
-            }
-
-            // Airplane
-            Image(systemName: "airplane")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(planeColor)
-                .position(x: planeX, y: centerY)
-        }
-        .frame(height: 18)
     }
 }
 
@@ -429,126 +315,413 @@ struct FlightLockScreenView: View {
     let state: FlightTrackingAttributes.ContentState
 
     var body: some View {
-        VStack(spacing: 6) {
-            // ── HEADER ROW ──
-            HStack {
-                Text(attributes.flightNumber)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.black.opacity(0.6))
-
-                Spacer()
-
-                if let gate = state.departureGate {
-                    HStack(spacing: 3) {
-                        Image(systemName: "figure.walk")
-                            .font(.system(size: 10, weight: .medium))
-                        Text(gate)
-                            .font(.system(size: 12, weight: .bold))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.07))
-                    .foregroundColor(.black.opacity(0.7))
-                    .cornerRadius(6)
-                } else {
-                    HStack(spacing: 4) {
-                        Image(systemName: "airplane")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.black.opacity(0.3))
-                        Text("AIRTIME")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.black.opacity(0.3))
-                    }
-                }
+        Group {
+            switch state.status {
+            case "Landed", "In Flight":
+                ArrivedLayout(attributes: attributes, state: state)
+            default:
+                StandardLayout(attributes: attributes, state: state)
             }
-
-            // ── MAIN FLIGHT ROW ──
-            HStack(spacing: 0) {
-                // Departure side
-                HStack(spacing: 4) {
-                    Text(attributes.originAirport)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.black)
-                    Text(FlightActivityWidget.formatTime(date: state.estimatedDeparture))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(FlightActivityWidget.timeColor(state: state, forDeparture: true, lightBackground: true))
-                }
-                .fixedSize()
-
-                // Dotted path
-                InlineFlightPathView(progress: state.progress, lightBackground: true)
-                    .padding(.horizontal, 4)
-
-                // Arrival side
-                HStack(spacing: 4) {
-                    Text(FlightActivityWidget.formatTime(date: state.estimatedArrival))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(FlightActivityWidget.timeColor(state: state, forDeparture: false, lightBackground: true))
-                    Text(attributes.destinationAirport)
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.black)
-                }
-                .fixedSize()
-            }
-
-            // ── STATUS ROW ──
-            HStack {
-                // Departure status
-                HStack(spacing: 0) {
-                    if let terminal = state.departureTerminal, !terminal.isEmpty {
-                        Text("T\(terminal)")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.black.opacity(0.5))
-                        Text(" \u{00B7} ")
-                            .font(.system(size: 12))
-                            .foregroundColor(.black.opacity(0.3))
-                    }
-                    Text(FlightActivityWidget.departureStatusText(state))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(FlightActivityWidget.statusColor(state))
-                }
-
-                Spacer()
-
-                // Arrival status
-                HStack(spacing: 0) {
-                    if let terminal = state.arrivalTerminal, !terminal.isEmpty {
-                        Text("T\(terminal)")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.black.opacity(0.5))
-                        Text(" \u{00B7} ")
-                            .font(.system(size: 12))
-                            .foregroundColor(.black.opacity(0.3))
-                    }
-                    Text(FlightActivityWidget.arrivalStatusText(state))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(FlightActivityWidget.arrivalStatusColor(state))
-                }
-            }
-
-            // ── CONTEXTUAL BANNER ──
-            let banner = FlightActivityWidget.bannerConfig(attributes: attributes, state: state)
-            HStack {
-                HStack(spacing: 5) {
-                    Image(systemName: banner.icon)
-                        .font(.system(size: 12, weight: .bold))
-                    Text(banner.text)
-                        .font(.system(size: 13, weight: .bold))
-                }
-                Spacer()
-                if !banner.detail.isEmpty {
-                    Text(banner.detail)
-                        .font(.system(size: 12, weight: .medium))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(banner.backgroundColor)
-            .foregroundColor(banner.foregroundColor)
-            .cornerRadius(10)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 19)
+        .padding(.vertical, 19)
+    }
+}
+
+// MARK: - Standard Layout (Scheduled / Delayed / In Flight / Cancelled / Diverted / Boarding)
+// Figma references: 66:2018 (pre flight start), 69:2067 (flight started)
+
+@available(iOS 16.2, *)
+private struct StandardLayout: View {
+    let attributes: FlightTrackingAttributes
+    let state: FlightTrackingAttributes.ContentState
+
+    // Time pill styling (non-delayed states only — delayed uses DelayTimePill)
+    private var pillBg: Color {
+        switch state.status {
+        case "Cancelled": return .red
+        case "Diverted": return C.orangePill
+        default: return C.bluePill
+        }
+    }
+
+    private var pillText: Color {
+        switch state.status {
+        case "Cancelled": return .white
+        case "Diverted": return C.orangePillText
+        default: return C.bluePillText
+        }
+    }
+
+    private var isDelayed: Bool { state.delayMinutes > 0 }
+
+    private var titleText: String {
+        switch state.status {
+        case "Cancelled": return "Flight cancelled"
+        case "Diverted":
+            if let airport = state.diversionAirport {
+                return "Diverted to \(airport)"
+            }
+            return "Flight diverted"
+        case "Boarding": return "Boarding now"
+        default:
+            if isDelayed {
+                return "Flight delayed"
+            }
+            return "Your flight is on time"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // ── ROW 1: Time pill + Title & airline info ──
+            HStack(alignment: .top, spacing: 16) {
+                // Departure time pill
+                if isDelayed {
+                    DelayTimePill(
+                        scheduledTime: attributes.scheduledDeparture,
+                        estimatedTime: state.estimatedDeparture
+                    )
+                } else {
+                    Text(formatTime24(state.estimatedDeparture))
+                        .font(.system(size: 29, weight: .heavy, design: .rounded))
+                        .tracking(1.16)
+                        .foregroundColor(pillText)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(pillBg)
+                        .cornerRadius(17)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    // Title
+                    Text(titleText)
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundColor(.black)
+                        .tracking(0.63)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+
+                    // Airline badge
+                    AirlineBadge(flightNumber: attributes.flightNumber)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Spacer()
+
+            // ── ROW 2: Route pill ──
+            RoutePill(
+                origin: attributes.originAirport,
+                destination: attributes.destinationAirport,
+                progress: state.progress,
+                departureDate: state.estimatedDeparture,
+                arrivalDate: state.estimatedArrival,
+                isDelayed: isDelayed
+            )
+
+            // ── ROW 3: Meta pills + Arrival info (tight below route) ──
+            HStack(spacing: 9) {
+                if let terminal = state.departureTerminal, !terminal.isEmpty {
+                    MetaPill(text: "T\(terminal)", bg: C.yellowTerminal, fg: C.yellowPillText)
+                }
+
+                if let gate = state.departureGate, !gate.isEmpty {
+                    MetaPill(text: gate, bg: C.yellowGate, fg: C.yellowPillText)
+                }
+
+                Spacer(minLength: 0)
+
+                if state.status != "Cancelled" {
+                    Text("Arrival at \(formatTime24(state.estimatedArrival))")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.black)
+                        .tracking(0.42)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+}
+
+// MARK: - Arrived Layout (In Flight + Landed)
+// Figma reference: 69:2099 (flight arrived / arrival-focused)
+
+@available(iOS 16.2, *)
+private struct ArrivedLayout: View {
+    let attributes: FlightTrackingAttributes
+    let state: FlightTrackingAttributes.ContentState
+
+    private var isLanded: Bool { state.status == "Landed" }
+    private var isDelayed: Bool { state.delayMinutes > 0 }
+
+    private var titleText: String {
+        if isLanded {
+            return "Arrived in \(attributes.destinationCity)"
+        }
+        return isDelayed ? "Arriving late" : "Arrival in \(attributes.destinationCity)"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // ── ROW 1: Title & airline (left) + Arrival time pill (right) ──
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(titleText)
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundColor(.black)
+                        .tracking(0.63)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+
+                    // Airline badge
+                    AirlineBadge(flightNumber: attributes.flightNumber)
+                }
+
+                Spacer(minLength: 0)
+
+                // Arrival time pill (on the right side)
+                if isDelayed {
+                    DelayTimePill(
+                        scheduledTime: attributes.scheduledArrival,
+                        estimatedTime: state.estimatedArrival
+                    )
+                } else {
+                    Text(formatTime24(state.estimatedArrival))
+                        .font(.system(size: 29, weight: .heavy, design: .rounded))
+                        .tracking(1.16)
+                        .foregroundColor(C.bluePillText)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(C.bluePill)
+                        .cornerRadius(17)
+                }
+            }
+
+            Spacer()
+
+            // ── ROW 2: Route pill ──
+            RoutePill(
+                origin: attributes.originAirport,
+                destination: attributes.destinationAirport,
+                progress: state.progress,
+                departureDate: isLanded ? nil : state.estimatedDeparture,
+                arrivalDate: isLanded ? nil : state.estimatedArrival,
+                isDelayed: isDelayed
+            )
+
+            // ── ROW 3: Bottom info (tight below route) ──
+            HStack(spacing: 9) {
+                Spacer(minLength: 0)
+
+                if let belt = state.baggageBelt, !belt.isEmpty {
+                    Text("Baggage belt number")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.black)
+                        .tracking(0.42)
+                    BaggagePill(beltNumber: belt)
+                }
+
+                if let terminal = state.arrivalTerminal, !terminal.isEmpty {
+                    MetaPill(text: "T\(terminal)", bg: C.yellowTerminal, fg: C.yellowPillText)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+}
+
+// MARK: - Reusable Components
+
+@available(iOS 16.2, *)
+private struct AirlineBadge: View {
+    let flightNumber: String
+
+    private var carrierCode: String {
+        String(flightNumber.prefix(2)).uppercased()
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Airline logo — bundled asset or text fallback
+            if let uiImage = UIImage(named: carrierCode) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 20, height: 20)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color(red: 230/255, green: 230/255, blue: 220/255))
+                    .frame(width: 20, height: 20)
+                    .overlay(
+                        Text(carrierCode)
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundColor(.black.opacity(0.5))
+                    )
+            }
+
+            Text(formatFlightNumber(flightNumber))
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.black)
+                .tracking(0.7)
+        }
+        .opacity(0.72)
+    }
+}
+
+@available(iOS 16.2, *)
+private struct RoutePill: View {
+    let origin: String
+    let destination: String
+    let progress: Int
+    var departureDate: Date? = nil
+    var arrivalDate: Date? = nil
+    var isDelayed: Bool = false
+
+    private var progressColor: Color {
+        isDelayed ? C.delayProgress : C.greenProgress
+    }
+
+    private var useAutoProgress: Bool {
+        guard let dep = departureDate, let arr = arrivalDate else { return false }
+        return progress > 0 && progress < 100 && arr > dep
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(origin)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(C.subtitleColor)
+                .tracking(0.45)
+                .fixedSize()
+                .padding(.leading, 7)
+
+            // Progress indicator area
+            if progress == 0 {
+                // Dot for pre-departure
+                GeometryReader { _ in
+                    HStack(spacing: 0) {
+                        Circle()
+                            .fill(progressColor)
+                            .frame(width: 15, height: 15)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxHeight: .infinity)
+                }
+                .padding(.horizontal, 9)
+            } else if useAutoProgress {
+                // Auto-animating progress — fills on-device without pushes
+                ProgressView(
+                    timerInterval: departureDate!...arrivalDate!,
+                    countsDown: false
+                ) { EmptyView() } currentValueLabel: { EmptyView() }
+                .progressViewStyle(.linear)
+                .tint(progressColor)
+                .scaleEffect(y: 3.75, anchor: .center)
+                .frame(height: 15)
+                .clipShape(Capsule())
+                .padding(.horizontal, 9)
+            } else {
+                // Static progress bar (arrived or fallback)
+                GeometryReader { geo in
+                    let totalWidth = geo.size.width
+                    HStack(spacing: 0) {
+                        Capsule()
+                            .fill(progressColor)
+                            .frame(
+                                width: max(15, totalWidth * CGFloat(progress) / 100.0),
+                                height: 15
+                            )
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxHeight: .infinity)
+                }
+                .padding(.horizontal, 9)
+            }
+
+            Text(destination)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(C.subtitleColor)
+                .tracking(0.45)
+                .fixedSize()
+                .padding(.trailing, 7)
+        }
+        .padding(.vertical, 5)
+        .background(C.routeBg)
+        .clipShape(Capsule())
+    }
+}
+
+@available(iOS 16.2, *)
+private struct MetaPill: View {
+    let text: String
+    let bg: Color
+    let fg: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 19, weight: .heavy, design: .rounded))
+            .foregroundColor(fg)
+            .padding(.horizontal, 9)
+            .frame(height: 33)
+            .background(bg)
+            .clipShape(Capsule())
+    }
+}
+
+@available(iOS 16.2, *)
+private struct BaggagePill: View {
+    let beltNumber: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "suitcase.fill")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+            Text(beltNumber)
+                .font(.system(size: 19, weight: .heavy, design: .rounded))
+        }
+        .foregroundColor(C.yellowPillText)
+        .padding(.horizontal, 9)
+        .frame(height: 33)
+        .background(C.baggageYellow)
+        .clipShape(Capsule())
+    }
+}
+
+@available(iOS 16.2, *)
+private struct DelayTimePill: View {
+    let scheduledTime: Date
+    let estimatedTime: Date
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            // Original time — struck through
+            Text(formatTime24(scheduledTime))
+                .font(.system(size: 19, weight: .medium, design: .rounded))
+                .tracking(0.76)
+                .strikethrough(true, color: C.delayPillTextLight)
+            // New estimated time
+            Text(formatTime24(estimatedTime))
+                .font(.system(size: 29, weight: .heavy, design: .rounded))
+                .tracking(1.16)
+        }
+        .foregroundColor(C.delayPillTextLight)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(
+            LinearGradient(
+                colors: [C.delayGradientStart, C.delayGradientEnd],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .cornerRadius(17)
+        .overlay(
+            RoundedRectangle(cornerRadius: 17)
+                .stroke(C.delayBorder, lineWidth: 5)
+        )
     }
 }
 
