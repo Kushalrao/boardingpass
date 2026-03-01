@@ -5,4 +5,3 @@ webdriver-manager==4.0.1
 beautifulsoup4==4.12.3
 httpx==0.26.0
 pydantic==2.5.3
-firecrawl-py==1.15.0

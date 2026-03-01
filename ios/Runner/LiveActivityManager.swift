@@ -9,6 +9,9 @@ class LiveActivityManager {
     // Maps Firestore flight ID → ActivityKit activity ID
     private var activeActivities: [String: String] = [:]
 
+    // Maps train ID → ActivityKit activity ID
+    private var activeTrainActivities: [String: String] = [:]
+
     // Callback to send push tokens back to Dart
     var onPushTokenUpdate: ((String, String) -> Void)?  // (flightId, tokenHex)
 
@@ -197,6 +200,117 @@ class LiveActivityManager {
             progress: progress,
             baggageBelt: params["baggageBelt"] as? String,
             diversionAirport: params["diversionAirport"] as? String
+        )
+    }
+    // MARK: - Train Live Activity
+
+    func startTrainActivity(params: [String: Any], completion: @escaping (Result<[String: String], Error>) -> Void) {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            completion(.failure(LiveActivityError.notSupported))
+            return
+        }
+
+        guard let trainId = params["trainId"] as? String,
+              let trainNumber = params["trainNumber"] as? String,
+              let trainName = params["trainName"] as? String,
+              let originStation = params["originStation"] as? String,
+              let originCode = params["originCode"] as? String,
+              let destinationStation = params["destinationStation"] as? String,
+              let destinationCode = params["destinationCode"] as? String
+        else {
+            completion(.failure(LiveActivityError.invalidParams))
+            return
+        }
+
+        let attributes = TrainTrackingAttributes(
+            trainNumber: trainNumber,
+            trainName: trainName,
+            originStation: originStation,
+            originCode: originCode,
+            destinationStation: destinationStation,
+            destinationCode: destinationCode
+        )
+
+        let initialState = buildTrainContentState(from: params)
+
+        do {
+            let activity = try Activity<TrainTrackingAttributes>.request(
+                attributes: attributes,
+                content: .init(state: initialState, staleDate: Date().addingTimeInterval(300))
+            )
+
+            activeTrainActivities[trainId] = activity.id
+            print("[TrainLiveActivity] Started activity \(activity.id) for \(trainNumber)")
+
+            completion(.success(["activityId": activity.id]))
+        } catch {
+            print("[TrainLiveActivity] Failed to start: \(error)")
+            completion(.failure(error))
+        }
+    }
+
+    func updateTrainActivity(params: [String: Any], completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let trainId = params["trainId"] as? String,
+              let activityId = activeTrainActivities[trainId]
+        else {
+            completion(.failure(LiveActivityError.activityNotFound))
+            return
+        }
+
+        let updatedState = buildTrainContentState(from: params)
+
+        Task {
+            for activity in Activity<TrainTrackingAttributes>.activities where activity.id == activityId {
+                await activity.update(
+                    ActivityContent(state: updatedState, staleDate: Date().addingTimeInterval(300))
+                )
+                print("[TrainLiveActivity] Updated activity \(activityId)")
+                completion(.success(()))
+                return
+            }
+            completion(.failure(LiveActivityError.activityNotFound))
+        }
+    }
+
+    func endTrainActivity(params: [String: Any], completion: @escaping (Result<Void, Error>) -> Void) {
+        guard let trainId = params["trainId"] as? String,
+              let activityId = activeTrainActivities[trainId]
+        else {
+            completion(.failure(LiveActivityError.activityNotFound))
+            return
+        }
+
+        let finalState = buildTrainContentState(from: params)
+
+        Task {
+            for activity in Activity<TrainTrackingAttributes>.activities where activity.id == activityId {
+                await activity.end(
+                    ActivityContent(state: finalState, staleDate: nil),
+                    dismissalPolicy: .default
+                )
+                print("[TrainLiveActivity] Ended activity \(activityId)")
+                activeTrainActivities.removeValue(forKey: trainId)
+                completion(.success(()))
+                return
+            }
+            activeTrainActivities.removeValue(forKey: trainId)
+            completion(.failure(LiveActivityError.activityNotFound))
+        }
+    }
+
+    private func buildTrainContentState(from params: [String: Any]) -> TrainTrackingAttributes.ContentState {
+        return TrainTrackingAttributes.ContentState(
+            currentStation: params["currentStation"] as? String,
+            currentStationCode: params["currentStationCode"] as? String,
+            nextStation: params["nextStation"] as? String,
+            nextStationCode: params["nextStationCode"] as? String,
+            nextStationArrival: params["nextStationArrival"] as? String,
+            destinationArrival: params["destinationArrival"] as? String,
+            delayMinutes: params["delayMinutes"] as? Int ?? 0,
+            platform: params["platform"] as? Int,
+            status: params["status"] as? String ?? "not_started",
+            lastUpdated: params["lastUpdated"] as? String,
+            progress: params["progress"] as? Int ?? 0
         )
     }
 }

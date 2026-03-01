@@ -129,6 +129,49 @@ import ActivityKit
       LiveActivityManager.shared.endAllActivities()
       result(nil)
 
+    // Train Live Activity methods
+    case "startTrainLiveActivity":
+      guard let params = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "INVALID_ARGS", message: "Expected Map arguments", details: nil))
+        return
+      }
+      LiveActivityManager.shared.startTrainActivity(params: params) { outcome in
+        switch outcome {
+        case .success(let data):
+          result(data)
+        case .failure(let error):
+          result(FlutterError(code: "START_ERROR", message: error.localizedDescription, details: nil))
+        }
+      }
+
+    case "updateTrainLiveActivity":
+      guard let params = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "INVALID_ARGS", message: "Expected Map arguments", details: nil))
+        return
+      }
+      LiveActivityManager.shared.updateTrainActivity(params: params) { outcome in
+        switch outcome {
+        case .success:
+          result(nil)
+        case .failure(let error):
+          result(FlutterError(code: "UPDATE_ERROR", message: error.localizedDescription, details: nil))
+        }
+      }
+
+    case "endTrainLiveActivity":
+      guard let params = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "INVALID_ARGS", message: "Expected Map arguments", details: nil))
+        return
+      }
+      LiveActivityManager.shared.endTrainActivity(params: params) { outcome in
+        switch outcome {
+        case .success:
+          result(nil)
+        case .failure(let error):
+          result(FlutterError(code: "END_ERROR", message: error.localizedDescription, details: nil))
+        }
+      }
+
     default:
       result(FlutterMethodNotImplemented)
     }

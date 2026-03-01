@@ -4,6 +4,7 @@ ConfirmTkt Scraper - Enhanced train data scraping.
 Provides train schedule, live status, and PNR status.
 """
 
+import json
 import os
 import re
 import time
@@ -212,9 +213,22 @@ class ConfirmTktScraper:
 
         return result
 
+    def _parse_delay_minutes(self, delay_str: str) -> int:
+        """Parse delay string like '08 Min', '01 Hr 53 Min', 'Right Time' into minutes."""
+        if not delay_str or delay_str.strip().lower() in ['right time', 'on time', 'rt', '']:
+            return 0
+        total = 0
+        hr_match = re.search(r'(\d+)\s*Hr', delay_str, re.I)
+        min_match = re.search(r'(\d+)\s*Min', delay_str, re.I)
+        if hr_match:
+            total += int(hr_match.group(1)) * 60
+        if min_match:
+            total += int(min_match.group(1))
+        return total
+
     def get_live_status(self, train_number: str, date: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get live running status of a train.
+        Get live running status of a train by extracting embedded JSON from page source.
 
         Args:
             train_number: 5-digit train number
@@ -257,166 +271,121 @@ class ConfirmTktScraper:
             except:
                 pass
 
-            page_text = self.driver.find_element(By.TAG_NAME, "body").text
+            # Extract the embedded JSON from page source instead of parsing rendered text
+            page_source = self.driver.page_source
 
-            # Extract train name - look for pattern like "12301 - RAJDHANI EXPRESS" or "12301 Train"
-            name_patterns = [
-                rf'{train_number}\s*[-–]\s*([A-Z][A-Z\s]+(?:EXP(?:RES(?:S)?)?|MAIL|RAJ(?:DHANI)?|SF|SPECIAL)?)',
-                rf'{train_number}\s+([A-Z][A-Z\s]+(?:running|Train))',
-            ]
-            for pattern in name_patterns:
-                name_match = re.search(pattern, page_text)
-                if name_match:
-                    name = name_match.group(1).strip()
-                    # Clean up name - remove trailing noise
-                    name = re.sub(r'\s*(running|Train|CHANGE|Live|Status).*', '', name, flags=re.I)
-                    name = name.split('\n')[0].strip()
-                    if len(name) > 2:
-                        result["train_name"] = name
+            # Find the start of "var data = {..." and use json.JSONDecoder to parse
+            # the exact JSON object (handles nested braces correctly)
+            data = None
+            var_match = re.search(r'var\s+data\s*=\s*', page_source)
+            if var_match:
+                json_start = var_match.end()
+                decoder = json.JSONDecoder()
+                data, _ = decoder.raw_decode(page_source, json_start)
+
+            if data:
+
+                # Extract train name
+                result["train_name"] = data.get("TrainName")
+
+                # Extract source/destination info
+                source_code = data.get("SourceCode", "")
+                dest_code = data.get("DestinationCode", "")
+
+                # Extract current status from page text (still useful for overall status)
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text
+                status_patterns = [
+                    r'(Train departed from [A-Za-z\s]+)',
+                    r'(Train arrived at [A-Za-z\s]+)',
+                    r'(Train is at [A-Za-z\s]+)',
+                    r'(Yet to start)',
+                    r'(Journey Completed)',
+                    r'(Cancelled)',
+                ]
+                for pattern in status_patterns:
+                    match = re.search(pattern, page_text, re.I)
+                    if match:
+                        result["current_status"] = match.group(1).strip()
                         break
 
-            # Fallback: try to find train name from page title
-            if not result["train_name"]:
-                title_match = re.search(rf'{train_number}\s+([A-Z][A-Z\s]+)\s+(?:running|live|status)', page_text, re.I)
-                if title_match:
-                    name = title_match.group(1).strip()
-                    name = name.split('\n')[0].strip()
-                    result["train_name"] = name
+                # Extract current location from status
+                if result["current_status"]:
+                    loc_match = re.search(r'(?:departed from|arrived at|is at)\s+([A-Za-z\s]+)', result["current_status"], re.I)
+                    if loc_match:
+                        result["current_location"] = loc_match.group(1).strip()
 
-            # Extract current status (e.g., "Train departed from HAJIGARH")
-            status_patterns = [
-                r'(Train departed from [A-Z\s]+)',
-                r'(Train arrived at [A-Z\s]+)',
-                r'(Train is at [A-Z\s]+)',
-                r'(Yet to start)',
-                r'(Journey Completed)',
-                r'(Cancelled)',
-                r'(Running [\d\s]+ (?:min|hr|hour)s? (?:late|early))',
-            ]
-            for pattern in status_patterns:
-                match = re.search(pattern, page_text, re.I)
-                if match:
-                    result["current_status"] = match.group(1).strip()
-                    break
+                # Extract last updated time
+                updated_match = re.search(r'Last Updated:\s*(\d{1,2}\s+\w+\s+\d{4}\s+\d{2}:\d{2})', page_text)
+                if updated_match:
+                    result["last_updated"] = updated_match.group(1)
 
-            # Extract current location from status
-            loc_match = re.search(r'(?:departed from|arrived at|is at)\s+([A-Z\s]+)', result.get("current_status", ""), re.I)
-            if loc_match:
-                result["current_location"] = loc_match.group(1).strip()
+                # Parse stations from the Schedule array
+                schedule = data.get("Schedule", [])
+                now = datetime.now()
+                found_current = False
 
-            # Extract last updated time
-            updated_match = re.search(r'Last Updated:\s*(\d{1,2}\s+\w+\s+\d{4}\s+\d{2}:\d{2})', page_text)
-            if updated_match:
-                result["last_updated"] = updated_match.group(1)
+                for station_data in schedule:
+                    station = {
+                        "station": station_data.get("StationName", ""),
+                        "station_code": station_data.get("StationCode", ""),
+                        "arrival": station_data.get("ArrivalTime", ""),
+                        "departure": station_data.get("DepartureTime", ""),
+                        "platform": station_data.get("ExpectedPlatformNo") or None,
+                        "day": station_data.get("Day", ""),
+                    }
 
-            # Parse station-wise live status
-            # The page format per station is:
-            #   Station Name
-            #   Day X  DD-Mon
-            #   HH:MM (arrival)
-            #   HH:MM (departure)
-            #   Delay by X hr Y min  OR  Right Time
-            lines = page_text.split('\n')
+                    # Parse halt time from HaltMinutes (format: "30:00" meaning 30 min)
+                    halt_str = station_data.get("HaltMinutes", "")
+                    if halt_str:
+                        halt_match = re.match(r'(\d+)', halt_str)
+                        if halt_match:
+                            halt_mins = int(halt_match.group(1))
+                            if halt_mins > 0:
+                                station["halt"] = f"{halt_mins} min"
 
-            # Skip UI elements
-            skip_patterns = [
-                'Check Live', 'Select', 'Submit', 'Free', 'Instant', 'Book',
-                'Station', 'Date', 'Arrives', 'Departs', 'Late', 'IRCTC',
-                'PNR', 'TRAIN', 'MORE', 'Login', 'Cancellation', 'Refund'
-            ]
+                    # Parse delays
+                    arr_delay_str = station_data.get("arrivalDelay", "")
+                    dep_delay_str = station_data.get("departureDelay", "")
+                    arr_delay = self._parse_delay_minutes(arr_delay_str)
+                    dep_delay = self._parse_delay_minutes(dep_delay_str)
+                    station["delay"] = max(arr_delay, dep_delay)
 
-            current_station = {}
+                    # Determine station status based on delay data availability
+                    # If delay data exists (even "Right Time" = 0), the train has passed/is at this station
+                    has_arr_delay = arr_delay_str and arr_delay_str.strip() != ""
+                    has_dep_delay = dep_delay_str and dep_delay_str.strip() != ""
 
-            for i, line in enumerate(lines):
-                line = line.strip()
+                    if has_arr_delay and has_dep_delay:
+                        station["status"] = "departed"
+                    elif has_arr_delay and not has_dep_delay:
+                        station["status"] = "arrived"  # train is currently here
+                        found_current = True
+                        result["current_location"] = station["station"]
+                    else:
+                        station["status"] = "upcoming"
 
-                # Skip empty lines and UI elements
-                if not line or any(skip in line for skip in skip_patterns):
-                    continue
+                    # Store coordinates if available
+                    lat = station_data.get("Latitude")
+                    lon = station_data.get("Longitude")
+                    if lat and lon:
+                        station["latitude"] = lat
+                        station["longitude"] = lon
 
-                # Look for station names - Title Case words (e.g. "Kalyan Jn", "Lokmanyatilak T")
-                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]*)*(?:\s+(?:Jn|T|City))?\.?$', line) and len(line) > 3:
-                    # Verify it's not a UI element
-                    if line not in ['Right Time', 'On Time']:
-                        if current_station and current_station.get('station'):
-                            result["stations"].append(current_station)
-                        current_station = {"station": line}
-                        continue
+                    # Distance from source
+                    distance = station_data.get("Distance")
+                    if distance:
+                        station["distance"] = distance
 
-                # Look for date (Day 1  20-Feb or similar)
-                if re.match(r'^Day\s+\d+\s+\d{1,2}-\w{3}', line) and current_station:
-                    current_station["date"] = line
-                    continue
+                    result["stations"].append(station)
 
-                # Look for time patterns (HH:MM)
-                if re.match(r'^\d{2}:\d{2}$', line) and current_station:
-                    if "arrival" not in current_station:
-                        current_station["arrival"] = line
-                    elif "departure" not in current_station:
-                        current_station["departure"] = line
-                    continue
+                result["success"] = len(result["stations"]) > 0
 
-                # Look for delay info - handle "Delay by X hr Y min" format
-                if current_station:
-                    if line in ['Right Time', 'On Time', 'RT']:
-                        current_station["delay"] = 0
-                        continue
+            else:
+                # No JSON found - page might not have loaded properly
+                result["error"] = "Could not extract train data from page"
 
-                    delay_match = re.match(r'^Delay by\s+(?:(\d+)\s*hr?\s*)?(\d+)?\s*min?', line, re.I)
-                    if delay_match:
-                        hrs = int(delay_match.group(1)) if delay_match.group(1) else 0
-                        mins = int(delay_match.group(2)) if delay_match.group(2) else 0
-                        current_station["delay"] = hrs * 60 + mins
-                        continue
-
-                    # Fallback: simpler delay patterns like "45 min late"
-                    simple_delay = re.match(r'^(\d+)\s*(min|hr)', line, re.I)
-                    if simple_delay:
-                        val = int(simple_delay.group(1))
-                        if 'hr' in simple_delay.group(2).lower():
-                            val *= 60
-                        current_station["delay"] = val
-                        continue
-
-            if current_station and current_station.get('station'):
-                result["stations"].append(current_station)
-
-            # Filter out any remaining invalid stations
-            valid_stations = []
-            seen_stations = set()
-            ad_cities = ['Lucknow', 'Pune', 'Bengaluru', 'Surat', 'Dharwad', 'Hyderabad',
-                         'Chennai', 'Ahmedabad', 'Jaipur', 'Kolkata', 'Mumbai']
-
-            for s in result["stations"]:
-                station_name = s.get('station', '')
-                # Skip invalid, duplicates, or ad cities
-                if not station_name or len(station_name) <= 3:
-                    continue
-                if any(skip.lower() in station_name.lower() for skip in skip_patterns):
-                    continue
-                if station_name in seen_stations:
-                    break  # Stop at first duplicate (likely ad section)
-                if station_name in ad_cities and not s.get('arrival'):
-                    break  # Stop at ad section (cities without times)
-
-                # Calculate halt time from arrival and departure
-                if s.get('arrival') and s.get('departure'):
-                    try:
-                        arr = datetime.strptime(s['arrival'], '%H:%M')
-                        dep = datetime.strptime(s['departure'], '%H:%M')
-                        diff = (dep - arr).seconds // 60
-                        if diff > 0 and diff < 120:  # reasonable halt: 1 min to 2 hrs
-                            s["halt"] = f"{diff} min"
-                    except ValueError:
-                        pass
-
-                seen_stations.add(station_name)
-                valid_stations.append(s)
-
-            result["stations"] = valid_stations
-
-            result["success"] = result["current_status"] is not None or len(result["stations"]) > 0
-
+        except json.JSONDecodeError as e:
+            result["error"] = f"Failed to parse train data JSON: {str(e)}"
         except TimeoutException:
             result["error"] = "Page load timeout"
         except Exception as e:

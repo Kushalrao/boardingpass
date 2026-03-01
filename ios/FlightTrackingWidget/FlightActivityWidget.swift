@@ -732,5 +732,6 @@ private struct DelayTimePill: View {
 struct FlightTrackingWidgetBundle: WidgetBundle {
     var body: some Widget {
         FlightActivityWidget()
+        TrainActivityWidget()
     }
 }

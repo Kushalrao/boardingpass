@@ -12,6 +12,7 @@ import 'services/auth_service.dart';
 import 'services/cirium_api_service.dart';
 import 'services/notification_service.dart';
 import 'services/flight_tracking_foreground_service.dart';
+import 'services/train_tracking_service.dart';
 import 'models/schedule.dart';
 import 'models/flight_status.dart';
 import 'models/common.dart';
@@ -78,6 +79,11 @@ class Trip {
   final String? gate;
   final String? baggageBelt;
 
+  // Train-specific data
+  final String? trainNumber;
+  final String? originCode;
+  final String? destinationCode;
+
   Trip({
     required this.type,
     required this.id,
@@ -93,6 +99,9 @@ class Trip {
     this.firestoreId,
     this.gate,
     this.baggageBelt,
+    this.trainNumber,
+    this.originCode,
+    this.destinationCode,
   });
 
   bool get isUpcoming => departureDateTime.isAfter(DateTime.now());
@@ -110,6 +119,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final CiriumApiService _ciriumService = CiriumApiService();
   final FlightTrackingForegroundService _flightTrackingService =
       FlightTrackingForegroundService();
+  final TrainTrackingService _trainTrackingService = TrainTrackingService();
   GoogleMapController? _mapController;
 
   // Trips state (combined flights and trains)
@@ -304,8 +314,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       }
       final now = DateTime.now();
       await _authService.saveFlight({
-        'flightNumber': '2892',
-        'fullFlightNumber': 'VS2892',
+        'flightNumber': '301',
+        'fullFlightNumber': 'VS301',
         'carrierFsCode': 'VS',
         'originAirport': 'LHR',
         'destinationAirport': 'JFK',
@@ -313,11 +323,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         'destinationCity': 'New York',
         'originAirportName': 'Heathrow',
         'destinationAirportName': 'John F. Kennedy International',
-        'departureTime': now.subtract(const Duration(hours: 1)).toIso8601String(),
-        'arrivalTime': now.add(const Duration(hours: 6)).toIso8601String(),
+        'departureTime': now.subtract(const Duration(hours: 2)).toIso8601String(),
+        'arrivalTime': now.add(const Duration(hours: 5, minutes: 30)).toIso8601String(),
         'departureTerminal': '3',
-        'arrivalTerminal': '4',
-        'gate': '37',
+        'arrivalTerminal': '1',
+        'gate': '22',
         'delayMinutes': 0,
         'stops': 0,
         'isCodeshare': false,
@@ -326,12 +336,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         'trafficRestrictions': <String>[],
         'airlineName': 'Virgin Atlantic',
       });
-      debugPrint('[Airtime] TEST: Added test in-flight VS2892 (LHR→JFK)');
+      debugPrint('[Airtime] TEST: Added test in-flight VS301 (LHR→JFK)');
       await _loadTrips();
     }
 
     // Start live tracking notifications for eligible flights
     _startFlightTrackingForTrips();
+
+    // DEBUG: Start train Live Activity tracking for a running train
+    _startTestTrainTracking();
   }
 
   Future<void> _loadTrips() async {
@@ -541,6 +554,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
+  // DEBUG: Start a test train Live Activity
+  void _startTestTrainTracking() {
+    _trainTrackingService.startTracking([
+      TrainTrackingData(
+        firestoreId: 'test-train-12742',
+        trainNumber: '12742',
+        trainName: 'PNBE VSG EXP',
+        originStation: 'PATNA JN',
+        originCode: 'PNBE',
+        destinationStation: 'VASCO DA GAMA',
+        destinationCode: 'VSG',
+      ),
+    ]);
+    debugPrint('[Airtime] TEST: Started train tracking for 12742');
+  }
+
   List<Trip> get _upcomingTrips => _trips.where((t) => t.isUpcoming).toList();
   List<Trip> get _previousTrips => _trips.where((t) => !t.isUpcoming).toList();
 
@@ -665,6 +694,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _searchController.dispose();
     _searchFocusNode.dispose();
     _flightTrackingService.dispose();
+    _trainTrackingService.dispose();
     super.dispose();
   }
 
