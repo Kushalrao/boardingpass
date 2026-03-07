@@ -1,5 +1,4 @@
 import { google, gmail_v1 } from 'googleapis';
-import { getTravelQuery } from '../utils/emailQuery';
 
 export interface EmailMessage {
   id: string;
@@ -25,14 +24,13 @@ export class GmailService {
     this.gmail = google.gmail({ version: 'v1', auth: oauth2Client });
   }
 
-  async fetchTravelEmails(options: {
+  /**
+   * Generic method to fetch emails matching any query, with batching.
+   */
+  async fetchEmails(query: string, options: {
     batchSize: number;
     batch: number;
-    year?: number;
   }): Promise<{ messages: EmailMessage[]; moreBatches: boolean; totalEmails: number }> {
-    const query = getTravelQuery();
-    const currentYear = options.year || new Date().getFullYear();
-
     // Fetch all message IDs matching the query
     let allMessageIds: gmail_v1.Schema$Message[] = [];
     let pageToken: string | undefined = undefined;
@@ -63,24 +61,6 @@ export class GmailService {
       if (!msgRef.id) continue;
 
       try {
-        // First check date with metadata only
-        const metadata = await this.gmail.users.messages.get({
-          userId: 'me',
-          id: msgRef.id,
-          format: 'metadata',
-          metadataHeaders: ['Date'],
-        });
-
-        const dateHeader = metadata.data.payload?.headers?.find(
-          (h) => h.name?.toLowerCase() === 'date'
-        );
-
-        if (!dateHeader?.value) continue;
-
-        // Check if email is from the target year
-        const emailDate = new Date(dateHeader.value);
-        if (emailDate.getFullYear() !== currentYear) continue;
-
         // Fetch full email
         const email = await this.gmail.users.messages.get({
           userId: 'me',
@@ -91,6 +71,7 @@ export class GmailService {
         const headers = email.data.payload?.headers || [];
         const subjectHeader = headers.find((h) => h.name?.toLowerCase() === 'subject');
         const fromHeader = headers.find((h) => h.name?.toLowerCase() === 'from');
+        const dateHeader = headers.find((h) => h.name?.toLowerCase() === 'date');
 
         // Extract body content
         let bodyContent = '';
@@ -108,7 +89,7 @@ export class GmailService {
           id: msgRef.id,
           subject: subjectHeader?.value || '',
           from: fromHeader?.value || '',
-          date: dateHeader.value,
+          date: dateHeader?.value || '',
           body: bodyContent,
           pdfAttachments,
         });

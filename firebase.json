@@ -1,4 +1,8 @@
 {
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
   "functions": {
     "source": "functions",
     "codebase": "default",
@@ -11,5 +15,33 @@
     "predeploy": [
       "npm --prefix \"$RESOURCE_DIR\" run build"
     ]
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "moneytest-app",
+          "appId": "1:69101330162:android:d747eba989025e4b51fa6b",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "moneytest-app",
+          "appId": "1:69101330162:ios:472cbd5d64cf1ff851fa6b",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "moneytest-app",
+          "configurations": {
+            "android": "1:69101330162:android:d747eba989025e4b51fa6b",
+            "ios": "1:69101330162:ios:472cbd5d64cf1ff851fa6b"
+          }
+        }
+      }
+    }
   }
 }

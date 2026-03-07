@@ -2,22 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CLIENT_ID</key>
-	<string>749462764377-1ugu6rat3jetoaomu1beeo2koqfmr5ic.apps.googleusercontent.com</string>
-	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.749462764377-1ugu6rat3jetoaomu1beeo2koqfmr5ic</string>
 	<key>API_KEY</key>
-	<string>AIzaSyBG6boG_rhWQqZaKtVd0u45xUo3I2sq5BM</string>
+	<string>AIzaSyDqMPUC2h353_1-HMuQxK2fJweziMq_Kbw</string>
 	<key>GCM_SENDER_ID</key>
-	<string>749462764377</string>
+	<string>69101330162</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
 	<string>com.example.airtime</string>
 	<key>PROJECT_ID</key>
-	<string>airtime-4e65f</string>
+	<string>moneytest-app</string>
 	<key>STORAGE_BUCKET</key>
-	<string>airtime-4e65f.firebasestorage.app</string>
+	<string>moneytest-app.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -29,6 +25,10 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:749462764377:ios:15212e65251dcc46ceaa48</string>
+	<string>1:69101330162:ios:472cbd5d64cf1ff851fa6b</string>
+	<key>CLIENT_ID</key>
+	<string>69101330162-564j0e9ur8vbhchecl8v5r5p9v7vndoi.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.69101330162-564j0e9ur8vbhchecl8v5r5p9v7vndoi</string>
 </dict>
 </plist>

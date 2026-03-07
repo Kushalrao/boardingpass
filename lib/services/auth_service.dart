@@ -1,4 +1,3 @@
-import 'dart:io' show Platform;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -15,11 +14,11 @@ class AuthService {
 
   // Web Client ID - used by Android for serverClientId
   static const String _webClientId =
-      '749462764377-aclvf7ak8dns39fmcd4vi4lof5ggaahe.apps.googleusercontent.com';
+      '69101330162-lp859j8rdim3615omh1v0e12fttc9tdm.apps.googleusercontent.com';
 
   // iOS Client ID
   static const String _iosClientId =
-      '749462764377-1ugu6rat3jetoaomu1beeo2koqfmr5ic.apps.googleusercontent.com';
+      '69101330162-564j0e9ur8vbhchecl8v5r5p9v7vndoi.apps.googleusercontent.com';
 
   final FirebaseAuth _firebaseAuth;
   final FirebaseFirestore _firestore;
@@ -38,8 +37,8 @@ class AuthService {
         _functions = functions ?? FirebaseFunctions.instance {
     _googleSignIn = GoogleSignIn(
       scopes: _scopes,
-      clientId: Platform.isIOS ? _iosClientId : null,
-      serverClientId: Platform.isAndroid ? _webClientId : null,
+      clientId: defaultTargetPlatform == TargetPlatform.iOS ? _iosClientId : null,
+      serverClientId: _webClientId,
       forceCodeForRefreshToken: true,
     );
   }
@@ -50,14 +49,8 @@ class AuthService {
   // Current app user (from Firestore)
   AppUser? get currentUser => _appUser;
 
-  // Check if user is signed in (with Google, not just anonymous)
-  bool get isSignedIn => firebaseUser != null && !firebaseUser!.isAnonymous;
-
-  // Check if user has any auth (including anonymous)
-  bool get hasAuth => firebaseUser != null;
-
-  // Check if current user is anonymous
-  bool get isAnonymous => firebaseUser?.isAnonymous ?? false;
+  // Check if user is signed in with Google
+  bool get isSignedIn => firebaseUser != null;
 
   // Get user ID
   String? get userId => firebaseUser?.uid;
@@ -69,86 +62,27 @@ class AuthService {
   Future<void> init() async {
     debugPrint('[AuthService] Initializing...');
 
-    // Listen for Google Sign-In changes
     _googleSignIn.onCurrentUserChanged.listen((GoogleSignInAccount? account) {
       _googleUser = account;
       debugPrint('[AuthService] Google user changed: ${account?.email}');
     });
 
-    // Check current auth state
     if (_firebaseAuth.currentUser != null) {
-      final user = _firebaseAuth.currentUser!;
-
-      if (user.isAnonymous) {
-        debugPrint('[AuthService] Anonymous user exists: ${user.uid}');
-        await _ensureAnonymousUserDocument(user);
-      } else {
-        debugPrint('[AuthService] Google user exists, loading app user...');
-        await _loadAppUser();
-
-        // Try silent Google sign in to restore Gmail access
-        await _googleSignIn.signInSilently();
-        _googleUser = _googleSignIn.currentUser;
-      }
-    } else {
-      // No user exists, create anonymous account
-      debugPrint('[AuthService] No user exists, creating anonymous account...');
-      await _signInAnonymously();
+      debugPrint('[AuthService] User exists, loading app user...');
+      await _loadAppUser();
+      await _googleSignIn.signInSilently();
+      _googleUser = _googleSignIn.currentUser;
     }
 
-    debugPrint('[AuthService] Initialized. Signed in: $isSignedIn, Anonymous: $isAnonymous');
+    debugPrint('[AuthService] Initialized. Signed in: $isSignedIn');
   }
 
-  /// Sign in anonymously (for new users who haven't signed in with Google)
-  Future<User?> _signInAnonymously() async {
-    try {
-      debugPrint('[AuthService] Creating anonymous account...');
-      final userCredential = await _firebaseAuth.signInAnonymously();
-      final user = userCredential.user;
-
-      if (user != null) {
-        debugPrint('[AuthService] Anonymous account created: ${user.uid}');
-        await _ensureAnonymousUserDocument(user);
-      }
-
-      return user;
-    } catch (e) {
-      debugPrint('[AuthService] Error creating anonymous account: $e');
-      return null;
-    }
-  }
-
-  /// Ensure anonymous user has a document in Firestore
-  Future<void> _ensureAnonymousUserDocument(User user) async {
-    final userRef = _firestore.collection('users').doc(user.uid);
-    final userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
-      debugPrint('[AuthService] Creating anonymous user document...');
-      final now = DateTime.now();
-      await userRef.set({
-        'uid': user.uid,
-        'isAnonymous': true,
-        'createdAt': Timestamp.fromDate(now),
-        'lastLoginAt': Timestamp.fromDate(now),
-      });
-    }
-  }
-
-  /// Sign in with Google and create/update Firebase account
-  /// If user was anonymous, attempts to link accounts or migrate data
+  /// Sign in with Google
   Future<AppUser?> signInWithGoogle() async {
     debugPrint('[AuthService] --- Sign In Started ---');
 
-    // Store anonymous user ID for potential data migration
-    final wasAnonymous = isAnonymous;
-    final anonymousUid = wasAnonymous ? firebaseUser!.uid : null;
-
     try {
-      // Step 1: Google Sign-In
-      debugPrint('[AuthService] Starting Google Sign-In...');
       final googleUser = await _googleSignIn.signIn();
-
       if (googleUser == null) {
         debugPrint('[AuthService] Google Sign-In cancelled by user');
         return null;
@@ -157,75 +91,36 @@ class AuthService {
       _googleUser = googleUser;
       debugPrint('[AuthService] Google Sign-In successful: ${googleUser.email}');
 
-      // Step 2: Get Google auth credentials
-      debugPrint('[AuthService] Getting Google auth credentials...');
       final googleAuth = await googleUser.authentication;
-
       final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
 
-      User? firebaseUser;
+      final userCredential = await _firebaseAuth.signInWithCredential(credential);
+      final user = userCredential.user;
 
-      // Step 3: Try to link anonymous account to Google, or sign in directly
-      if (wasAnonymous && _firebaseAuth.currentUser != null) {
-        debugPrint('[AuthService] Attempting to link anonymous account to Google...');
-        try {
-          final userCredential = await _firebaseAuth.currentUser!.linkWithCredential(credential);
-          firebaseUser = userCredential.user;
-          debugPrint('[AuthService] Successfully linked anonymous account to Google: ${firebaseUser?.uid}');
-        } on FirebaseAuthException catch (e) {
-          if (e.code == 'credential-already-in-use' || e.code == 'email-already-in-use') {
-            // Google account already exists, need to migrate data
-            debugPrint('[AuthService] Google account already exists, migrating data...');
-
-            // Sign in with Google credential (this will switch to the existing account)
-            final userCredential = await _firebaseAuth.signInWithCredential(credential);
-            firebaseUser = userCredential.user;
-
-            if (firebaseUser != null && anonymousUid != null) {
-              // Migrate flights from anonymous account to Google account
-              await _migrateFlightsFromAnonymous(anonymousUid, firebaseUser.uid);
-
-              // Delete anonymous user document
-              await _deleteAnonymousUserData(anonymousUid);
-            }
-          } else {
-            rethrow;
-          }
-        }
-      } else {
-        // No anonymous account, just sign in with Google
-        debugPrint('[AuthService] Signing in to Firebase with Google...');
-        final userCredential = await _firebaseAuth.signInWithCredential(credential);
-        firebaseUser = userCredential.user;
-      }
-
-      if (firebaseUser == null) {
+      if (user == null) {
         debugPrint('[AuthService] Firebase sign-in failed - no user returned');
         return null;
       }
 
-      debugPrint('[AuthService] Firebase Sign-In successful: ${firebaseUser.uid}');
+      debugPrint('[AuthService] Firebase Sign-In successful: ${user.uid}');
 
-      // Step 4: Create or update user in Firestore
-      debugPrint('[AuthService] Creating/updating user in Firestore...');
-      _appUser = await _createOrUpdateUser(firebaseUser, googleUser);
+      // Create or update user in Firestore
+      _appUser = await _createOrUpdateUser(user, googleUser);
 
-      // Step 5: Store refresh token for backend use (Gmail webhook)
+      // Store refresh token for backend Gmail access
       final serverAuthCode = googleUser.serverAuthCode;
       if (serverAuthCode != null) {
         debugPrint('[AuthService] Storing refresh token...');
         try {
-          final callable = _functions.httpsCallable('storeRefreshToken');
-          await callable.call({'authCode': serverAuthCode});
+          await _functions.httpsCallable('storeRefreshToken').call({
+            'authCode': serverAuthCode,
+          });
           debugPrint('[AuthService] Refresh token stored successfully');
 
-          // Step 6: Set up Gmail watch for push notifications
-          debugPrint('[AuthService] Setting up Gmail watch...');
-          final watchCallable = _functions.httpsCallable('setupGmailWatch');
-          await watchCallable.call();
+          await _functions.httpsCallable('setupGmailWatch').call();
           debugPrint('[AuthService] Gmail watch set up successfully');
         } catch (e) {
           debugPrint('[AuthService] Warning: Failed to store refresh token or setup watch: $e');
@@ -233,103 +128,11 @@ class AuthService {
       }
 
       debugPrint('[AuthService] --- Sign In Complete ---');
-      debugPrint('[AuthService] User: ${_appUser?.email} (${_appUser?.uid})');
-
       return _appUser;
     } catch (e, stackTrace) {
       debugPrint('[AuthService] ERROR during sign in: $e');
       debugPrint('[AuthService] Stack trace: $stackTrace');
-      return null;
-    }
-  }
-
-  /// Migrate flights from anonymous account to Google account
-  Future<void> _migrateFlightsFromAnonymous(String anonymousUid, String googleUid) async {
-    debugPrint('[AuthService] Migrating flights from $anonymousUid to $googleUid...');
-
-    try {
-      // Get all flights from anonymous account
-      final anonymousFlights = await _firestore
-          .collection('users')
-          .doc(anonymousUid)
-          .collection('flights')
-          .get();
-
-      if (anonymousFlights.docs.isEmpty) {
-        debugPrint('[AuthService] No flights to migrate');
-        return;
-      }
-
-      // Get existing flights from Google account for duplicate detection
-      final googleFlights = await _firestore
-          .collection('users')
-          .doc(googleUid)
-          .collection('flights')
-          .get();
-
-      final existingKeys = <String>{};
-      for (final doc in googleFlights.docs) {
-        final data = doc.data();
-        final key = _createFlightUniqueKey(data);
-        existingKeys.add(key);
-      }
-
-      // Migrate non-duplicate flights
-      int migratedCount = 0;
-      int skippedCount = 0;
-
-      for (final doc in anonymousFlights.docs) {
-        final data = doc.data();
-        final key = _createFlightUniqueKey(data);
-
-        if (existingKeys.contains(key)) {
-          debugPrint('[AuthService] Skipping duplicate flight: $key');
-          skippedCount++;
-          continue;
-        }
-
-        // Add to Google account
-        await _firestore
-            .collection('users')
-            .doc(googleUid)
-            .collection('flights')
-            .add(data);
-        migratedCount++;
-      }
-
-      debugPrint('[AuthService] Migration complete: $migratedCount migrated, $skippedCount skipped');
-    } catch (e) {
-      debugPrint('[AuthService] Error migrating flights: $e');
-    }
-  }
-
-  /// Create unique key for flight duplicate detection
-  String _createFlightUniqueKey(Map<String, dynamic> data) {
-    return '${data['flightNumber']}_${data['departureDate']}_${data['departureTime']}_${data['arrivalTime']}_${data['originAirport']}_${data['destinationAirport']}';
-  }
-
-  /// Delete anonymous user data after migration
-  Future<void> _deleteAnonymousUserData(String anonymousUid) async {
-    debugPrint('[AuthService] Deleting anonymous user data: $anonymousUid');
-
-    try {
-      // Delete all flights subcollection
-      final flights = await _firestore
-          .collection('users')
-          .doc(anonymousUid)
-          .collection('flights')
-          .get();
-
-      for (final doc in flights.docs) {
-        await doc.reference.delete();
-      }
-
-      // Delete user document
-      await _firestore.collection('users').doc(anonymousUid).delete();
-
-      debugPrint('[AuthService] Anonymous user data deleted');
-    } catch (e) {
-      debugPrint('[AuthService] Error deleting anonymous user data: $e');
+      rethrow;
     }
   }
 
@@ -343,42 +146,22 @@ class AuthService {
     final now = DateTime.now();
 
     if (userDoc.exists) {
-      // Update existing user (could be converting from anonymous or updating Google user)
-      debugPrint('[AuthService] Updating existing user...');
+      await userRef.update({
+        'lastLoginAt': Timestamp.fromDate(now),
+        'displayName': googleUser.displayName,
+        'photoUrl': googleUser.photoUrl,
+      });
 
       final existingData = userDoc.data()!;
-      final wasAnonymous = existingData['isAnonymous'] == true;
-
-      if (wasAnonymous) {
-        // Converting from anonymous - update with Google info and remove anonymous flag
-        debugPrint('[AuthService] Converting anonymous user to Google user...');
-        await userRef.update({
-          'email': googleUser.email,
-          'displayName': googleUser.displayName,
-          'photoUrl': googleUser.photoUrl,
-          'lastLoginAt': Timestamp.fromDate(now),
-          'isAnonymous': FieldValue.delete(),
-        });
-      } else {
-        // Just updating existing Google user
-        await userRef.update({
-          'lastLoginAt': Timestamp.fromDate(now),
-          'displayName': googleUser.displayName,
-          'photoUrl': googleUser.photoUrl,
-        });
-      }
-
       return AppUser(
         uid: firebaseUser.uid,
         email: googleUser.email,
         displayName: googleUser.displayName,
         photoUrl: googleUser.photoUrl,
-        createdAt: (existingData['createdAt'] as Timestamp).toDate(),
+        createdAt: (existingData['createdAt'] as Timestamp?)?.toDate() ?? now,
         lastLoginAt: now,
       );
     } else {
-      // Create new user
-      debugPrint('[AuthService] Creating new user...');
       final newUser = AppUser(
         uid: firebaseUser.uid,
         email: googleUser.email,
@@ -415,7 +198,6 @@ class AuthService {
   /// Sign out from both Google and Firebase
   Future<void> signOut() async {
     debugPrint('[AuthService] Signing out...');
-
     try {
       await _googleSignIn.signOut();
       await _firebaseAuth.signOut();
@@ -427,7 +209,7 @@ class AuthService {
     }
   }
 
-  /// Get Gmail access token (for calling Firebase Functions)
+  /// Get Gmail access token
   Future<String?> getGmailAccessToken() async {
     if (_googleUser == null) {
       debugPrint('[AuthService] No Google user, cannot get access token');
@@ -444,80 +226,38 @@ class AuthService {
     }
   }
 
-  /// Get Firebase ID token (for authenticated requests)
+  /// Get Firebase ID token
   Future<String?> getIdToken() async {
     return await firebaseUser?.getIdToken();
   }
 
-  /// Save a flight to Firestore
-  Future<void> saveFlight(Map<String, dynamic> flightData) async {
-    if (firebaseUser == null) {
-      debugPrint('[AuthService] Cannot save flight - no user');
-      return;
-    }
+  /// Store date of birth for PDF password resolution
+  Future<void> storeDateOfBirth(DateTime dob) async {
+    if (firebaseUser == null) return;
 
     try {
       await _firestore
           .collection('users')
           .doc(firebaseUser!.uid)
-          .collection('flights')
-          .add({
-        ...flightData,
-        'addedAt': FieldValue.serverTimestamp(),
-        'source': 'manual',
-      });
-      debugPrint('[AuthService] Flight saved to Firestore');
+          .update({'dateOfBirth': Timestamp.fromDate(dob)});
+      debugPrint('[AuthService] DOB stored successfully');
     } catch (e) {
-      debugPrint('[AuthService] Error saving flight: $e');
+      debugPrint('[AuthService] Error storing DOB: $e');
     }
   }
 
-  /// Load all flights from Firestore
-  Future<List<Map<String, dynamic>>> loadFlights() async {
-    if (firebaseUser == null) {
-      debugPrint('[AuthService] Cannot load flights - no user');
-      return [];
-    }
+  /// Check if user has stored their date of birth
+  Future<bool> hasDateOfBirth() async {
+    if (firebaseUser == null) return false;
 
     try {
-      final snapshot = await _firestore
+      final doc = await _firestore
           .collection('users')
           .doc(firebaseUser!.uid)
-          .collection('flights')
-          .orderBy('addedAt', descending: true)
           .get();
-
-      final flights = snapshot.docs.map((doc) {
-        final data = doc.data();
-        data['id'] = doc.id;
-        return data;
-      }).toList();
-
-      debugPrint('[AuthService] Loaded ${flights.length} flights from Firestore');
-      return flights;
+      return doc.data()?['dateOfBirth'] != null;
     } catch (e) {
-      debugPrint('[AuthService] Error loading flights: $e');
-      return [];
-    }
-  }
-
-  /// Delete a flight from Firestore
-  Future<void> deleteFlight(String flightId) async {
-    if (firebaseUser == null) {
-      debugPrint('[AuthService] Cannot delete flight - no user');
-      return;
-    }
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(firebaseUser!.uid)
-          .collection('flights')
-          .doc(flightId)
-          .delete();
-      debugPrint('[AuthService] Flight deleted from Firestore');
-    } catch (e) {
-      debugPrint('[AuthService] Error deleting flight: $e');
+      return false;
     }
   }
 }

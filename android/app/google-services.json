@@ -1,37 +1,45 @@
 {
   "project_info": {
-    "project_number": "749462764377",
-    "project_id": "airtime-4e65f",
-    "storage_bucket": "airtime-4e65f.firebasestorage.app"
+    "project_number": "69101330162",
+    "project_id": "moneytest-app",
+    "storage_bucket": "moneytest-app.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:749462764377:android:7eb1d0a38c322152ceaa48",
+        "mobilesdk_app_id": "1:69101330162:android:d747eba989025e4b51fa6b",
         "android_client_info": {
           "package_name": "com.example.airtime"
         }
       },
       "oauth_client": [
         {
-          "client_id": "749462764377-aclvf7ak8dns39fmcd4vi4lof5ggaahe.apps.googleusercontent.com",
+          "client_id": "69101330162-rde0n6r5gto1upfkac21data4p3pq8eq.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.airtime",
+            "certificate_hash": "2c1e5d176927016d2ba8a0e1ac9e0a6608b27522"
+          }
+        },
+        {
+          "client_id": "69101330162-lp859j8rdim3615omh1v0e12fttc9tdm.apps.googleusercontent.com",
           "client_type": 3
         }
       ],
       "api_key": [
         {
-          "current_key": "AIzaSyBOvYwiGuRIyFeywrH2VvjnQ02_9v47q0c"
+          "current_key": "AIzaSyD26HduL-OHgJNuHeNPsToHQhbIouBRhGY"
         }
       ],
       "services": {
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "749462764377-aclvf7ak8dns39fmcd4vi4lof5ggaahe.apps.googleusercontent.com",
+              "client_id": "69101330162-lp859j8rdim3615omh1v0e12fttc9tdm.apps.googleusercontent.com",
               "client_type": 3
             },
             {
-              "client_id": "749462764377-1ugu6rat3jetoaomu1beeo2koqfmr5ic.apps.googleusercontent.com",
+              "client_id": "69101330162-564j0e9ur8vbhchecl8v5r5p9v7vndoi.apps.googleusercontent.com",
               "client_type": 2,
               "ios_info": {
                 "bundle_id": "com.example.airtime"

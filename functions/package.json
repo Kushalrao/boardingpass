@@ -1,7 +1,7 @@
 {
-  "name": "airtime-functions",
+  "name": "moneytest-functions",
   "version": "1.0.0",
-  "description": "Firebase Functions for Airtime - Gmail travel email analysis",
+  "description": "Firebase Functions for financial email analysis and AI chat",
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
@@ -16,15 +16,13 @@
   },
   "main": "lib/index.js",
   "dependencies": {
-    "axios": "^1.6.0",
+    "@anthropic-ai/sdk": "^0.39.0",
     "firebase-admin": "^12.0.0",
     "firebase-functions": "^5.0.0",
     "googleapis": "^140.0.0",
-    "openai": "^4.20.0",
-    "pdf-parse": "^1.1.1"
+    "mupdf": "^1.27.0"
   },
   "devDependencies": {
-    "@types/pdf-parse": "^1.1.4",
     "typescript": "^5.3.0"
   },
   "private": true

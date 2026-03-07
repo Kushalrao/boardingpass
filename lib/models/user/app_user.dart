@@ -24,8 +24,8 @@ class AppUser {
       email: data['email'] as String,
       displayName: data['displayName'] as String?,
       photoUrl: data['photoUrl'] as String?,
-      createdAt: (data['createdAt'] as Timestamp).toDate(),
-      lastLoginAt: (data['lastLoginAt'] as Timestamp).toDate(),
+      createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      lastLoginAt: (data['lastLoginAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

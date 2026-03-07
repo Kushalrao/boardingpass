@@ -1,18 +1,27 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
 import { google } from 'googleapis';
-import { GmailService } from './services/gmailService';
+import { GmailService, EmailMessage } from './services/gmailService';
 import { GmailWatchService } from './services/gmailWatchService';
+import { FinanceExtractionService } from './services/financeExtractionService';
 import { PdfService } from './services/pdfService';
-import { OpenAIService, convertToINR } from './services/openaiService';
-import { CiriumAlertService } from './services/ciriumAlertService';
-import { CiriumRatingsService } from './services/ciriumRatingsService';
-import { CiriumFlightStatusService } from './services/ciriumFlightStatusService';
-import { CiriumWeatherService } from './services/ciriumWeatherService';
-import { CiriumEquipmentService } from './services/ciriumEquipmentService';
-import { FcmService } from './services/fcmService';
-import { detectBookingType } from './utils/bookingDetector';
-import { Booking, TravelAnalysisResponse, AnalyzeTravelRequest } from './types/bookingTypes';
+import { getFinanceQuery } from './utils/financeEmailQuery';
+import { detectFinanceEmailType, isFinancialEmail } from './utils/financeDetector';
+import { redactPII } from './utils/piiRedactor';
+import { findDuplicate, markStatementConfirmed } from './utils/deduplication';
+import { generatePasswordCandidates } from './utils/statementPasswordPatterns';
+import { AIChatService } from './services/aiChatService';
+import {
+  ExtractedTransaction,
+  AnalyzeFinanceRequest,
+  AnalyzeFinanceResponse,
+  AskFinanceAIRequest,
+  FinanceEmailType,
+  MonthlyAggregate,
+  YearlyAggregate,
+  CategoryBreakdown,
+  MerchantBreakdown,
+} from './types/financeTypes';
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -20,183 +29,595 @@ if (!admin.apps.length) {
 }
 
 // Environment variables
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const CIRIUM_WEBHOOK_URL = process.env.CIRIUM_WEBHOOK_URL || 'https://us-central1-airtime-4e65f.cloudfunctions.net/ciriumAlertWebhook';
 
-export const analyzeTravel = functions
-  .runWith({
-    timeoutSeconds: 540, // 9 minutes (max for HTTP functions)
-    memory: '1GB',
-  })
-  .https.onCall(async (data: AnalyzeTravelRequest, context): Promise<TravelAnalysisResponse> => {
-    // Validate request
-    if (!data.accessToken) {
-      throw new functions.https.HttpsError(
-        'invalid-argument',
-        'Access token is required'
-      );
+// ============================================
+// HELPER: Auto-detect / create account
+// ============================================
+
+/**
+ * Finds or creates a financial account document for a given
+ * masked card/account number. Used during transaction processing
+ * to automatically build the user's account list.
+ */
+async function getOrCreateAccount(
+  userId: string,
+  maskedNumber: string,
+  provider: string,
+  accountType: string
+): Promise<string> {
+  const db = admin.firestore();
+  const accountsRef = db
+    .collection('users')
+    .doc(userId)
+    .collection('accounts');
+
+  // Check if account already exists
+  const existing = await accountsRef
+    .where('maskedNumber', '==', maskedNumber)
+    .where('provider', '==', provider)
+    .limit(1)
+    .get();
+
+  if (!existing.empty) return existing.docs[0].id;
+
+  // Create new account
+  const newDoc = await accountsRef.add({
+    type: accountType,
+    provider,
+    maskedNumber,
+    detectedAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastTransactionAt: admin.firestore.FieldValue.serverTimestamp(),
+    transactionCount: 0,
+  });
+
+  return newDoc.id;
+}
+
+// ============================================
+// HELPER: Store a single extracted transaction
+// ============================================
+
+/**
+ * Persists an extracted transaction to Firestore, handling
+ * account auto-detection and deduplication.
+ *
+ * Returns the stored transaction or null if it was a duplicate.
+ */
+async function storeTransaction(
+  userId: string,
+  extracted: ExtractedTransaction,
+  emailMessageId: string,
+  emailDate: string,
+  emailType: FinanceEmailType,
+  source: 'batch' | 'webhook' | 'statement',
+  pdfMeta?: { storagePath: string; filename: string }
+): Promise<{ id: string; data: FirebaseFirestore.DocumentData } | null> {
+  const db = admin.firestore();
+
+  // Check for duplicates
+  const existingId = await findDuplicate(userId, extracted, emailMessageId);
+  if (existingId) {
+    // If this came from a statement and the existing one was from an alert,
+    // mark it as statement-confirmed for higher confidence
+    if (source === 'statement') {
+      await markStatementConfirmed(userId, existingId);
     }
+    console.log(`Duplicate transaction found: ${existingId}, skipping`);
+    return null;
+  }
 
-    if (!OPENAI_API_KEY) {
-      throw new functions.https.HttpsError(
-        'failed-precondition',
-        'OpenAI API key not configured'
-      );
-    }
+  // Auto-detect or create account
+  const accountId = await getOrCreateAccount(
+    userId,
+    extracted.accountMasked,
+    extracted.provider,
+    extracted.accountType
+  );
 
-    const options = {
-      batchSize: data.options?.batchSize || 5,
-      batch: data.options?.batch || 1,
-      year: data.options?.year || new Date().getFullYear(),
-    };
+  // Build the Firestore document
+  const txnDate = new Date(extracted.transactionDate);
+  const now = admin.firestore.FieldValue.serverTimestamp();
 
-    console.log(`Processing batch ${options.batch} with size ${options.batchSize}`);
+  const txnData: Record<string, unknown> = {
+    accountId,
+    type: extracted.type,
+    amount: extracted.amount,
+    currency: extracted.currency || 'INR',
+    amountINR: extracted.amountINR,
+    merchant: extracted.merchant,
+    merchantRaw: extracted.merchantRaw,
+    category: extracted.category,
+    subcategory: extracted.subcategory || null,
+    date: admin.firestore.Timestamp.fromDate(txnDate),
+    emailDate: admin.firestore.Timestamp.fromDate(new Date(emailDate)),
+    emailMessageId,
+    source,
+    emailType,
+    status: extracted.status || 'confirmed',
+    referenceNumber: extracted.referenceNumber || null,
+    balance: extracted.balance ?? null,
+    statementConfirmed: source === 'statement',
+    pdfStoragePath: pdfMeta?.storagePath || null,
+    pdfFilename: pdfMeta?.filename || null,
+    tags: [],
+    createdAt: now,
+    updatedAt: now,
+  };
 
-    // Initialize services
-    const gmailService = new GmailService(data.accessToken);
+  const docRef = await db
+    .collection('users')
+    .doc(userId)
+    .collection('transactions')
+    .add(txnData);
+
+  // Update account's lastTransactionAt and increment count
+  await db
+    .collection('users')
+    .doc(userId)
+    .collection('accounts')
+    .doc(accountId)
+    .update({
+      lastTransactionAt: now,
+      transactionCount: admin.firestore.FieldValue.increment(1),
+    });
+
+  return { id: docRef.id, data: txnData };
+}
+
+// ============================================
+// HELPER: Process a single financial email
+// ============================================
+
+/**
+ * Takes a single email message, detects its type, redacts PII,
+ * extracts transaction(s), and stores them. Returns an array of
+ * stored transactions (may be multiple for statement PDFs).
+ */
+async function processFinancialEmail(
+  userId: string,
+  message: EmailMessage,
+  gmailService: GmailService,
+  extractionService: FinanceExtractionService,
+  source: 'batch' | 'webhook'
+): Promise<ExtractedTransaction[]> {
+  const emailType = detectFinanceEmailType(message.subject, message.from);
+
+  // Skip non-financial or OTP emails
+  if (emailType === 'otp_or_auth' || emailType === 'unknown') {
+    return [];
+  }
+
+  const results: ExtractedTransaction[] = [];
+  const redactedBody = redactPII(message.body);
+
+  // Process PDF attachments from ANY financial email
+  if (message.pdfAttachments.length > 0) {
     const pdfService = new PdfService();
-    const openaiService = new OpenAIService(OPENAI_API_KEY);
+    const db = admin.firestore();
+    const bucket = admin.storage().bucket();
 
-    try {
-      // Fetch travel emails
-      const { messages, moreBatches, totalEmails } = await gmailService.fetchTravelEmails(options);
-      console.log(`Found ${messages.length} emails in this batch, ${totalEmails} total`);
+    // Load user data once for all PDF processing
+    const userDoc = await db.collection('users').doc(userId).get();
+    const userData = userDoc.data();
 
-      const travels: Booking[] = [];
+    // Build password candidates once
+    let passwords: string[] = [];
+    if (userData?.dateOfBirth) {
+      const dob = userData.dateOfBirth.toDate
+        ? userData.dateOfBirth.toDate()
+        : new Date(userData.dateOfBirth);
 
-      for (const message of messages) {
-        console.log(`Processing: ${message.subject}`);
+      const fromMatch = message.from.match(/<([^>]+)>/);
+      const fromEmail = fromMatch ? fromMatch[1] : message.from.trim();
+      const senderDomain = fromEmail.substring(fromEmail.lastIndexOf('@') + 1).toLowerCase();
 
-        // Detect booking type
-        const bookingType = detectBookingType(message.subject, message.from);
-        console.log(`Detected type: ${bookingType}`);
+      // Get known masked numbers for password generation
+      const accountsSnap = await db.collection('users').doc(userId)
+        .collection('accounts').get();
+      const maskedNumbers = accountsSnap.docs
+        .map((d) => d.data().maskedNumber as string)
+        .filter(Boolean);
 
-        // Only process flight bookings
-        if (bookingType !== 'flight') {
-          console.log(`Skipping non-flight booking: ${bookingType}`);
-          continue;
-        }
+      const allCandidates: string[] = [];
+      const baseCandidates = generatePasswordCandidates(
+        '', senderDomain, dob, userData.displayName || undefined
+      );
+      allCandidates.push(...baseCandidates.map((c) => c.password));
 
-        let content = '';
-        let pdfParseStatus = 'not_attempted';
-        let pdfParseError = '';
-
-        // Try PDF attachments first
-        if (message.pdfAttachments.length > 0) {
-          pdfParseStatus = 'attempted';
-
-          for (const pdf of message.pdfAttachments) {
-            try {
-              const pdfBuffer = await gmailService.fetchPdfAttachment(message.id, pdf.attachmentId);
-              content = await pdfService.extractText(pdfBuffer);
-              pdfParseStatus = 'success';
-              console.log(`Extracted ${content.length} chars from PDF`);
-              break; // Use first successful PDF
-            } catch (error: any) {
-              pdfParseStatus = 'error';
-              pdfParseError = error.message;
-              console.error(`PDF parse error: ${error.message}`);
+      for (const masked of maskedNumbers) {
+        const last4 = masked.replace(/[^0-9]/g, '').slice(-4);
+        if (last4.length === 4) {
+          const extraCandidates = generatePasswordCandidates(
+            '', senderDomain, dob, userData.displayName || undefined, last4
+          );
+          for (const c of extraCandidates) {
+            if (!allCandidates.includes(c.password)) {
+              allCandidates.push(c.password);
             }
           }
-        }
-
-        // Fall back to email body if no PDF content
-        if (!content && message.body && message.body.length > 100) {
-          content = message.body;
-          pdfParseStatus = 'email_body';
-        }
-
-        if (!content) {
-          console.log('No content to analyze, skipping');
-          continue;
-        }
-
-        // Extract booking data using OpenAI
-        try {
-          const bookingData = await openaiService.extractBookingData(content, bookingType);
-
-          if (bookingData && Object.keys(bookingData).length > 0) {
-            // Extract amount and convert to INR
-            let amount: number | undefined;
-            let currency: string | undefined;
-            let amountINR: number | undefined;
-
-            if ('total_amount_paid' in bookingData && bookingData.total_amount_paid) {
-              amount = bookingData.total_amount_paid.amount ?? undefined;
-              currency = bookingData.total_amount_paid.currency ?? undefined;
-            } else if ('total_amount' in bookingData && bookingData.total_amount) {
-              amount = (bookingData.total_amount as any).amount ?? undefined;
-              currency = (bookingData.total_amount as any).currency ?? undefined;
-            } else if ('fees' in bookingData && bookingData.fees) {
-              amount = (bookingData.fees as any).amount ?? undefined;
-              currency = (bookingData.fees as any).currency ?? undefined;
-            }
-
-            if (amount && currency) {
-              amountINR = convertToINR(amount, currency) ?? undefined;
-            }
-
-            // Extract origin/destination
-            let origin: string | undefined;
-            let destination: string | undefined;
-
-            if ('flights' in bookingData && bookingData.flights?.[0]) {
-              origin = bookingData.flights[0].departure?.city ?? undefined;
-              destination = bookingData.flights[0].arrival?.city ?? undefined;
-            } else if ('departure' in bookingData && 'arrival' in bookingData) {
-              origin = (bookingData.departure as any)?.city || (bookingData.departure as any)?.location;
-              destination = (bookingData.arrival as any)?.city || (bookingData.arrival as any)?.location;
-            } else if ('address' in bookingData) {
-              destination = (bookingData.address as any)?.city;
-            } else if ('location' in bookingData) {
-              destination = (bookingData.location as any)?.city;
-            } else if ('venue' in bookingData) {
-              destination = (bookingData.venue as any)?.city;
-            } else if ('country' in bookingData) {
-              destination = bookingData.country as string;
-            }
-
-            travels.push({
-              ...bookingData,
-              booking_type: bookingType,
-              date: message.date,
-              pdfParseStatus,
-              pdfParseError,
-              origin,
-              destination,
-              amount,
-              currency,
-              amountINR,
-            } as Booking);
-
-            console.log(`Successfully extracted ${bookingType} booking`);
-          }
-        } catch (error: any) {
-          console.error(`OpenAI extraction error: ${error.message}`);
         }
       }
-
-      // Sort by date
-      travels.sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime());
-
-      console.log(`Returning ${travels.length} bookings`);
-
-      return {
-        travels,
-        moreBatches,
-        nextBatch: moreBatches ? options.batch + 1 : null,
-        totalEmails,
-      };
-    } catch (error: any) {
-      console.error('Travel analysis error:', error);
-      throw new functions.https.HttpsError(
-        'internal',
-        `Failed to analyze travel data: ${error.message}`
-      );
+      passwords = allCandidates;
     }
-  });
+
+    for (const attachment of message.pdfAttachments) {
+      try {
+        // Fetch the PDF data from Gmail
+        const rawPdfBuffer = await gmailService.fetchPdfAttachment(
+          message.id,
+          attachment.attachmentId
+        );
+
+        // Store raw PDF in Cloud Storage
+        const storagePath = `users/${userId}/pdfs/${message.id}/${attachment.filename}`;
+        try {
+          await bucket.file(storagePath).save(rawPdfBuffer, {
+            metadata: { contentType: 'application/pdf' },
+          });
+        } catch (storageErr) {
+          console.warn(`Could not store PDF to Cloud Storage: ${storageErr}`);
+        }
+
+        // Decrypt PDF if needed using mupdf
+        let pdfResult;
+        try {
+          pdfResult = await pdfService.processForClaude(rawPdfBuffer, passwords);
+        } catch (pdfError: any) {
+          const errorMsg = pdfError?.message || String(pdfError);
+          const status = errorMsg.startsWith('password_required') ? 'failed_password'
+            : errorMsg.startsWith('corrupt') ? 'failed_corrupt'
+            : errorMsg.startsWith('empty') ? 'failed_empty'
+            : 'failed_unknown';
+
+          console.warn(`PDF processing failed for ${attachment.filename}: ${errorMsg}`);
+
+          // Track failed PDF for re-processing later
+          try {
+            await db.collection('users').doc(userId).collection('storedPdfs').add({
+              emailMessageId: message.id,
+              filename: attachment.filename,
+              storagePath,
+              subject: message.subject,
+              from: message.from,
+              emailDate: message.date,
+              emailType,
+              status,
+              passwordProtected: status === 'failed_password',
+              transactionsExtracted: 0,
+              pageCount: 0,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          } catch (_) { /* ignore tracking errors */ }
+
+          continue;
+        }
+
+        // Send decrypted PDF directly to Claude (no text extraction needed)
+        console.log(
+          `Sending PDF ${attachment.filename} (${pdfResult.pageCount} pages, ` +
+          `encrypted=${pdfResult.wasEncrypted}) directly to Claude`
+        );
+
+        const statement = await extractionService.extractFromPdf(pdfResult.pdfBuffer);
+        const txnCount = statement?.transactions?.length || 0;
+
+        // Track PDF in Firestore
+        try {
+          await db.collection('users').doc(userId).collection('storedPdfs').add({
+            emailMessageId: message.id,
+            filename: attachment.filename,
+            storagePath,
+            subject: message.subject,
+            from: message.from,
+            emailDate: message.date,
+            emailType,
+            status: 'processed',
+            passwordProtected: pdfResult.wasEncrypted,
+            transactionsExtracted: txnCount,
+            pageCount: pdfResult.pageCount,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } catch (_) { /* ignore tracking errors */ }
+
+        if (!statement || !statement.transactions.length) continue;
+
+        // Store each transaction with PDF metadata
+        const pdfMeta = { storagePath, filename: attachment.filename };
+        for (const txn of statement.transactions) {
+          if (txn.skip) continue;
+
+          const stored = await storeTransaction(
+            userId,
+            txn,
+            message.id,
+            message.date,
+            emailType,
+            'statement',
+            pdfMeta
+          );
+
+          if (stored) {
+            results.push(txn);
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing PDF attachment ${attachment.filename}:`, err);
+        continue;
+      }
+    }
+  }
+
+  // Also process the email body text (alert / single-transaction)
+  if (redactedBody.trim().length > 20) {
+    const content = `Subject: ${message.subject}\nFrom: ${message.from}\nDate: ${message.date}\n\n${redactedBody}`;
+    const extracted = await extractionService.extractTransaction(content, emailType);
+
+    if (extracted && !extracted.skip) {
+      const stored = await storeTransaction(
+        userId,
+        extracted,
+        message.id,
+        message.date,
+        emailType,
+        source
+      );
+
+      if (stored) {
+        results.push(extracted);
+      }
+    }
+  }
+
+  return results;
+}
+
+// ============================================
+// HELPER: Compute monthly aggregate
+// ============================================
+
+/**
+ * Recomputes the monthly aggregate for a given YYYY-MM period.
+ * Queries all transactions for that month, then writes/overwrites
+ * the aggregate document.
+ */
+async function computeMonthlyAggregate(
+  userId: string,
+  yearMonth: string
+): Promise<void> {
+  const db = admin.firestore();
+  const [yearStr, monthStr] = yearMonth.split('-');
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+
+  // Build date range for the month
+  const startOfMonth = new Date(year, month - 1, 1);
+  const endOfMonth = new Date(year, month, 0, 23, 59, 59, 999);
+
+  const transactionsRef = db
+    .collection('users')
+    .doc(userId)
+    .collection('transactions');
+
+  const snapshot = await transactionsRef
+    .where('date', '>=', admin.firestore.Timestamp.fromDate(startOfMonth))
+    .where('date', '<=', admin.firestore.Timestamp.fromDate(endOfMonth))
+    .get();
+
+  let totalSpending = 0;
+  let totalIncome = 0;
+  const categoryBreakdown: CategoryBreakdown = {};
+  const merchantTotals: Record<string, { total: number; count: number }> = {};
+  const accountBreakdown: Record<string, { spending: number; income: number }> = {};
+  let largestTransaction: { amount: number; merchant: string; date: string } | null = null;
+  let smallestTransaction: { amount: number; merchant: string; date: string } | null = null;
+
+  for (const doc of snapshot.docs) {
+    const txn = doc.data();
+    const amount = txn.amountINR || txn.amount || 0;
+    const merchant = txn.merchant || 'Unknown';
+    const category = txn.category || 'other';
+    const accountId = txn.accountId || 'unknown';
+    const txnDateStr = txn.date?.toDate?.()
+      ? txn.date.toDate().toISOString().split('T')[0]
+      : yearMonth + '-01';
+
+    if (txn.type === 'debit') {
+      totalSpending += amount;
+
+      // Account breakdown
+      if (!accountBreakdown[accountId]) {
+        accountBreakdown[accountId] = { spending: 0, income: 0 };
+      }
+      accountBreakdown[accountId].spending += amount;
+
+      // Largest / smallest (only debits for spending analysis)
+      if (!largestTransaction || amount > largestTransaction.amount) {
+        largestTransaction = { amount, merchant, date: txnDateStr };
+      }
+      if (!smallestTransaction || amount < smallestTransaction.amount) {
+        smallestTransaction = { amount, merchant, date: txnDateStr };
+      }
+    } else {
+      totalIncome += amount;
+
+      if (!accountBreakdown[accountId]) {
+        accountBreakdown[accountId] = { spending: 0, income: 0 };
+      }
+      accountBreakdown[accountId].income += amount;
+    }
+
+    // Category breakdown (all transactions)
+    if (!categoryBreakdown[category]) {
+      categoryBreakdown[category] = { total: 0, count: 0, avgTransaction: 0 };
+    }
+    categoryBreakdown[category].total += amount;
+    categoryBreakdown[category].count += 1;
+
+    // Merchant totals
+    if (!merchantTotals[merchant]) {
+      merchantTotals[merchant] = { total: 0, count: 0 };
+    }
+    merchantTotals[merchant].total += amount;
+    merchantTotals[merchant].count += 1;
+  }
+
+  // Compute category averages
+  for (const cat of Object.keys(categoryBreakdown)) {
+    const { total, count } = categoryBreakdown[cat];
+    categoryBreakdown[cat].avgTransaction = count > 0 ? total / count : 0;
+  }
+
+  // Build top-20 merchant breakdown
+  const sortedMerchants = Object.entries(merchantTotals)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 20);
+  const merchantBreakdown: MerchantBreakdown = {};
+  for (const [name, data] of sortedMerchants) {
+    merchantBreakdown[name] = data;
+  }
+
+  const aggregate: MonthlyAggregate = {
+    period: yearMonth,
+    type: 'monthly',
+    totalSpending,
+    totalIncome,
+    netFlow: totalIncome - totalSpending,
+    transactionCount: snapshot.size,
+    categoryBreakdown,
+    merchantBreakdown,
+    accountBreakdown,
+    largestTransaction,
+    smallestTransaction,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp,
+  };
+
+  const aggregateDocId = `monthly_${yearStr}_${monthStr.padStart(2, '0')}`;
+  await db
+    .collection('users')
+    .doc(userId)
+    .collection('financialAggregates')
+    .doc(aggregateDocId)
+    .set(aggregate, { merge: false });
+
+  console.log(
+    `Updated monthly aggregate ${aggregateDocId} for user ${userId}: ` +
+    `${snapshot.size} txns, spending=${totalSpending}, income=${totalIncome}`
+  );
+}
+
+// ============================================
+// HELPER: Compute yearly aggregate
+// ============================================
+
+/**
+ * Recomputes the yearly aggregate by reading all monthly aggregates
+ * for the given year and rolling them up.
+ */
+async function computeYearlyAggregate(
+  userId: string,
+  year: number
+): Promise<void> {
+  const db = admin.firestore();
+  const aggregatesRef = db
+    .collection('users')
+    .doc(userId)
+    .collection('financialAggregates');
+
+  // Read all monthly aggregates for this year
+  const monthlyDocs = await aggregatesRef
+    .where('type', '==', 'monthly')
+    .where('period', '>=', `${year}-01`)
+    .where('period', '<=', `${year}-12`)
+    .get();
+
+  let totalSpending = 0;
+  let totalIncome = 0;
+  let totalTransactionCount = 0;
+  const categoryBreakdown: CategoryBreakdown = {};
+  const merchantTotals: Record<string, { total: number; count: number }> = {};
+  const monthlyTrend: Array<{ month: string; spending: number; income: number }> = [];
+
+  for (const doc of monthlyDocs.docs) {
+    const monthly = doc.data() as MonthlyAggregate;
+
+    totalSpending += monthly.totalSpending || 0;
+    totalIncome += monthly.totalIncome || 0;
+    totalTransactionCount += monthly.transactionCount || 0;
+
+    monthlyTrend.push({
+      month: monthly.period,
+      spending: monthly.totalSpending || 0,
+      income: monthly.totalIncome || 0,
+    });
+
+    // Merge category breakdowns
+    if (monthly.categoryBreakdown) {
+      for (const [cat, data] of Object.entries(monthly.categoryBreakdown)) {
+        if (!categoryBreakdown[cat]) {
+          categoryBreakdown[cat] = { total: 0, count: 0, avgTransaction: 0 };
+        }
+        categoryBreakdown[cat].total += data.total;
+        categoryBreakdown[cat].count += data.count;
+      }
+    }
+
+    // Merge merchant breakdowns
+    if (monthly.merchantBreakdown) {
+      for (const [merchant, data] of Object.entries(monthly.merchantBreakdown)) {
+        if (!merchantTotals[merchant]) {
+          merchantTotals[merchant] = { total: 0, count: 0 };
+        }
+        merchantTotals[merchant].total += data.total;
+        merchantTotals[merchant].count += data.count;
+      }
+    }
+  }
+
+  // Compute category averages
+  for (const cat of Object.keys(categoryBreakdown)) {
+    const { total, count } = categoryBreakdown[cat];
+    categoryBreakdown[cat].avgTransaction = count > 0 ? total / count : 0;
+  }
+
+  // Top-20 merchants for yearly
+  const sortedMerchants = Object.entries(merchantTotals)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 20);
+  const merchantBreakdown: MerchantBreakdown = {};
+  for (const [name, data] of sortedMerchants) {
+    merchantBreakdown[name] = data;
+  }
+
+  // Sort monthly trend chronologically
+  monthlyTrend.sort((a, b) => a.month.localeCompare(b.month));
+
+  const aggregate: YearlyAggregate = {
+    period: `${year}`,
+    type: 'yearly',
+    totalSpending,
+    totalIncome,
+    netFlow: totalIncome - totalSpending,
+    transactionCount: totalTransactionCount,
+    categoryBreakdown,
+    merchantBreakdown,
+    monthlyTrend,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp() as unknown as FirebaseFirestore.Timestamp,
+  };
+
+  await aggregatesRef.doc(`yearly_${year}`).set(aggregate, { merge: false });
+
+  console.log(
+    `Updated yearly aggregate yearly_${year} for user ${userId}: ` +
+    `${totalTransactionCount} txns, spending=${totalSpending}, income=${totalIncome}`
+  );
+}
+
+// ============================================
+// AUTH & GMAIL SETUP FUNCTIONS
+// ============================================
 
 /**
  * Store refresh token for Gmail access
@@ -208,7 +629,6 @@ export const storeRefreshToken = functions
     memory: '256MB',
   })
   .https.onCall(async (data: { authCode: string }, context) => {
-    // Verify user is authenticated
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -235,32 +655,26 @@ export const storeRefreshToken = functions
     console.log(`Storing refresh token for user: ${userId}`);
 
     try {
-      // Create OAuth2 client
       const oauth2Client = new google.auth.OAuth2(
         GOOGLE_CLIENT_ID,
         GOOGLE_CLIENT_SECRET,
-        '' // No redirect URI needed for mobile auth code exchange
+        ''
       );
 
-      // Exchange auth code for tokens
       const { tokens } = await oauth2Client.getToken(authCode);
 
       if (!tokens.refresh_token) {
-        console.log('No refresh token returned - user may have already authorized');
         throw new functions.https.HttpsError(
           'failed-precondition',
           'No refresh token returned. User may need to revoke app access and re-authorize.'
         );
       }
 
-      // Store refresh token in Firestore
       const db = admin.firestore();
       await db.collection('users').doc(userId).update({
         gmailRefreshToken: tokens.refresh_token,
         gmailTokenUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-
-      console.log('Refresh token stored successfully');
 
       return { success: true };
     } catch (error: any) {
@@ -274,7 +688,6 @@ export const storeRefreshToken = functions
 
 /**
  * Set up Gmail watch for push notifications
- * Call this after storing refresh token to start receiving new email notifications
  */
 export const setupGmailWatch = functions
   .runWith({
@@ -306,364 +719,587 @@ export const setupGmailWatch = functions
     }
   });
 
+// ============================================
+// 1. analyzeFinance — Batch Financial Email Processing
+// ============================================
+
 /**
- * Gmail webhook handler - receives Pub/Sub notifications when new emails arrive
- * This is triggered by Google Cloud Pub/Sub
+ * Processes financial emails in batches using the Gmail API.
+ *
+ * For each email:
+ *  - Detects the email type (transaction alert, statement, etc.)
+ *  - Skips OTP/auth and unknown emails
+ *  - Redacts PII before sending to AI
+ *  - Extracts transaction data via Claude
+ *  - Handles PDF statement attachments with password attempts
+ *  - Deduplicates against existing transactions
+ *  - Auto-detects and creates new accounts
+ *  - Stores transactions in Firestore
+ *  - Recomputes monthly/yearly aggregates for affected periods
  */
-export const gmailWebhook = functions.pubsub
-  .topic('gmail-notifications') // Must match your Pub/Sub topic name
-  .onPublish(async (message) => {
-    console.log('Received Gmail notification');
+export const analyzeFinance = functions
+  .runWith({
+    timeoutSeconds: 540,
+    memory: '512MB',
+  })
+  .https.onCall(async (data: AnalyzeFinanceRequest, context) => {
+    // Authentication check — accept either Firebase Auth or userId in body
+    const userId = context.auth?.uid || (data as any).userId;
+    if (!userId) {
+      throw new functions.https.HttpsError(
+        'unauthenticated',
+        'User must be authenticated'
+      );
+    }
 
+    // Validate inputs
+    const { accessToken, options } = data;
+    if (!accessToken) {
+      throw new functions.https.HttpsError(
+        'invalid-argument',
+        'accessToken is required'
+      );
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'ANTHROPIC_API_KEY is not configured'
+      );
+    }
+
+    const batchSize = options?.batchSize || 20;
+    const batch = options?.batch || 1;
+    const afterDate = options?.afterDate;
+    const year = options?.year;
+
+    console.log(
+      `analyzeFinance: user=${userId}, batch=${batch}, batchSize=${batchSize}, afterDate=${afterDate}, year=${year}`
+    );
+
+    try {
+      // Initialize services
+      const gmailService = new GmailService(accessToken);
+      const extractionService = new FinanceExtractionService(ANTHROPIC_API_KEY);
+
+      // Build the finance query with date filtering
+      const query = getFinanceQuery({ afterDate, year });
+
+      // Fetch financial emails for this batch
+      const { messages, moreBatches, totalEmails } = await gmailService.fetchEmails(query, {
+        batchSize,
+        batch,
+      });
+
+      console.log(
+        `Fetched ${messages.length} emails (batch ${batch}), ` +
+        `totalEmails=${totalEmails}, moreBatches=${moreBatches}`
+      );
+
+      // Process each email
+      const allExtracted: ExtractedTransaction[] = [];
+      const affectedMonths: Set<string> = new Set();
+
+      for (const message of messages) {
+        try {
+          const extracted = await processFinancialEmail(
+            userId,
+            message,
+            gmailService,
+            extractionService,
+            'batch'
+          );
+
+          for (const txn of extracted) {
+            allExtracted.push(txn);
+
+            // Track affected months for aggregate recomputation
+            if (txn.transactionDate) {
+              const [txnYear, txnMonth] = txn.transactionDate.split('-');
+              affectedMonths.add(`${txnYear}-${txnMonth}`);
+            }
+          }
+        } catch (err) {
+          console.error(`Error processing email ${message.id}:`, err);
+          continue;
+        }
+      }
+
+      // Recompute aggregates for all affected months
+      const affectedYears: Set<number> = new Set();
+      for (const ym of affectedMonths) {
+        try {
+          await computeMonthlyAggregate(userId, ym);
+          const yearNum = parseInt(ym.split('-')[0], 10);
+          affectedYears.add(yearNum);
+        } catch (err) {
+          console.error(`Error computing monthly aggregate for ${ym}:`, err);
+        }
+      }
+
+      // Recompute yearly aggregates
+      for (const yr of affectedYears) {
+        try {
+          await computeYearlyAggregate(userId, yr);
+        } catch (err) {
+          console.error(`Error computing yearly aggregate for ${yr}:`, err);
+        }
+      }
+
+      const response: AnalyzeFinanceResponse = {
+        transactions: allExtracted,
+        moreBatches,
+        nextBatch: moreBatches ? batch + 1 : null,
+        totalEmails,
+        processedCount: messages.length,
+      };
+
+      console.log(
+        `analyzeFinance complete: ${allExtracted.length} transactions extracted ` +
+        `from ${messages.length} emails`
+      );
+
+      return response;
+    } catch (error: any) {
+      console.error('analyzeFinance error:', error);
+      throw new functions.https.HttpsError(
+        'internal',
+        `Failed to analyze financial emails: ${error.message}`
+      );
+    }
+  });
+
+// ============================================
+// 2. gmailWebhook — Real-time Pub/Sub Processing
+// ============================================
+
+/**
+ * Triggered by Gmail push notifications via Pub/Sub.
+ *
+ * When a new email arrives in a watched Gmail inbox, Google publishes
+ * a message to our Pub/Sub topic. This function:
+ *  1. Decodes the notification to get the user's email and historyId
+ *  2. Finds the corresponding user in Firestore
+ *  3. Fetches new message IDs since the last known historyId
+ *  4. For each new message, checks if it's a financial email
+ *  5. If financial: redacts PII, extracts transaction, deduplicates, stores
+ *  6. Updates the stored historyId for the next notification
+ */
+export const gmailWebhook = functions
+  .runWith({
+    timeoutSeconds: 120,
+    memory: '512MB',
+  })
+  .pubsub.topic('gmail-notifications')
+  .onPublish(async (pubsubMessage) => {
     // Decode the Pub/Sub message
-    const data = message.json;
-    const emailAddress = data.emailAddress;
-    const historyId = data.historyId;
+    let emailAddress: string;
+    let historyId: string;
 
-    console.log(`Email: ${emailAddress}, HistoryId: ${historyId}`);
+    try {
+      const messageData = pubsubMessage.data
+        ? JSON.parse(Buffer.from(pubsubMessage.data, 'base64').toString('utf-8'))
+        : {};
 
-    // Find user by email
+      emailAddress = messageData.emailAddress;
+      historyId = messageData.historyId;
+
+      if (!emailAddress) {
+        console.warn('gmailWebhook: No emailAddress in Pub/Sub message, ignoring');
+        return;
+      }
+
+      console.log(
+        `gmailWebhook: notification for ${emailAddress}, historyId=${historyId}`
+      );
+    } catch (err) {
+      console.error('gmailWebhook: Failed to decode Pub/Sub message:', err);
+      return;
+    }
+
+    // Find the user by email address in Firestore
     const db = admin.firestore();
-    const usersSnapshot = await db
+    const usersQuery = await db
       .collection('users')
       .where('email', '==', emailAddress)
       .limit(1)
       .get();
 
-    if (usersSnapshot.empty) {
-      console.log(`No user found for email: ${emailAddress}`);
+    if (usersQuery.empty) {
+      console.warn(`gmailWebhook: No user found for email ${emailAddress}`);
       return;
     }
 
-    const userDoc = usersSnapshot.docs[0];
+    const userDoc = usersQuery.docs[0];
     const userId = userDoc.id;
     const userData = userDoc.data();
     const lastHistoryId = userData.gmailWatchHistoryId;
 
-    console.log(`Processing for user: ${userId}, last historyId: ${lastHistoryId}`);
+    if (!lastHistoryId) {
+      console.warn(`gmailWebhook: No gmailWatchHistoryId for user ${userId}, skipping`);
+      return;
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      console.error('gmailWebhook: ANTHROPIC_API_KEY not configured');
+      return;
+    }
 
     try {
       const watchService = new GmailWatchService();
 
-      // Get new message IDs since last history
-      const messageIds = await watchService.getNewMessages(userId, lastHistoryId);
-      console.log(`Found ${messageIds.length} new messages`);
+      // Get new message IDs since last history checkpoint
+      const newMessageIds = await watchService.getNewMessages(userId, lastHistoryId);
+      console.log(
+        `gmailWebhook: ${newMessageIds.length} new messages for user ${userId}`
+      );
 
-      if (messageIds.length === 0) {
-        // Update history ID even if no new messages
+      if (newMessageIds.length === 0) {
+        // Update historyId even if no new messages (avoids replaying old history)
         await db.collection('users').doc(userId).update({
           gmailWatchHistoryId: historyId,
         });
         return;
       }
 
-      // Get access token for processing
+      // Get a fresh access token for fetching email content
       const accessToken = await watchService.getAccessToken(userId);
-
-      // Initialize services
       const gmailService = new GmailService(accessToken);
-      const pdfService = new PdfService();
-      const openaiService = new OpenAIService(OPENAI_API_KEY!);
+      const extractionService = new FinanceExtractionService(ANTHROPIC_API_KEY);
 
-      // Process each new message
-      for (const messageId of messageIds) {
+      const affectedMonths: Set<string> = new Set();
+
+      for (const messageId of newMessageIds) {
         try {
-          // Fetch full message
+          // Fetch the full email
           const message = await gmailService.fetchMessageById(messageId);
-
           if (!message) {
-            console.log(`Could not fetch message: ${messageId}`);
+            console.warn(`gmailWebhook: Could not fetch message ${messageId}`);
             continue;
           }
 
-          // Detect booking type
-          const bookingType = detectBookingType(message.subject, message.from);
-          console.log(`Message ${messageId}: type=${bookingType}`);
-
-          // Only process flight bookings
-          if (bookingType !== 'flight') {
-            console.log(`Skipping non-flight booking: ${bookingType}`);
+          // Quick check: is this a financial email?
+          if (!isFinancialEmail(message.subject, message.from)) {
             continue;
           }
 
-          // Extract content (PDF or body)
-          let content = '';
-          if (message.pdfAttachments.length > 0) {
-            for (const pdf of message.pdfAttachments) {
-              try {
-                const pdfBuffer = await gmailService.fetchPdfAttachment(messageId, pdf.attachmentId);
-                content = await pdfService.extractText(pdfBuffer);
-                break;
-              } catch (e) {
-                console.error(`PDF parse error: ${e}`);
-              }
+          console.log(
+            `gmailWebhook: Processing financial email ${messageId}: "${message.subject}"`
+          );
+
+          // Process the financial email
+          const extracted = await processFinancialEmail(
+            userId,
+            message,
+            gmailService,
+            extractionService,
+            'webhook'
+          );
+
+          // Track affected months
+          for (const txn of extracted) {
+            if (txn.transactionDate) {
+              const [txnYear, txnMonth] = txn.transactionDate.split('-');
+              affectedMonths.add(`${txnYear}-${txnMonth}`);
             }
           }
-
-          if (!content && message.body) {
-            content = message.body;
-          }
-
-          if (!content) {
-            console.log(`No content for message: ${messageId}`);
-            continue;
-          }
-
-          // Extract booking data
-          const bookingData = await openaiService.extractBookingData(content, bookingType);
-
-          if (bookingData && Object.keys(bookingData).length > 0) {
-            // Fetch performance ratings if flight data available
-            let performanceRating = null;
-            if ('flights' in bookingData && bookingData.flights?.[0]) {
-              const flight = bookingData.flights[0];
-              // Extract carrier code from flight_number (e.g., "AI111" -> "AI")
-              const flightNum = flight.flight_number || '';
-              const carrierMatch = flightNum.match(/^([A-Z]{2})/);
-              const carrier = carrierMatch ? carrierMatch[1] : null;
-              const numericFlightNum = flightNum.replace(/^[A-Z]+/, '');
-              const depAirport = flight.departure?.airport_code || undefined;
-              const arrAirport = flight.arrival?.airport_code || undefined;
-
-              if (carrier && numericFlightNum) {
-                try {
-                  const ratingsService = new CiriumRatingsService();
-                  const rating = await ratingsService.getFlightRatings(
-                    carrier,
-                    numericFlightNum,
-                    depAirport,
-                    arrAirport
-                  );
-                  if (rating) {
-                    performanceRating = ratingsService.formatForStorage(rating);
-                    console.log(`Fetched rating for ${carrier}${numericFlightNum}: ${performanceRating.ontimePercent}% on-time`);
-                  }
-                } catch (e) {
-                  console.error('Error fetching ratings:', e);
-                }
-              }
-            }
-
-            // Store in user's travels collection
-            await db.collection('users').doc(userId).collection('travels').doc(messageId).set({
-              ...bookingData,
-              booking_type: bookingType,
-              date: message.date,
-              emailMessageId: messageId,
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-              source: 'webhook', // Mark as automatically fetched
-              ...(performanceRating && { performanceRating }),
-            });
-
-            console.log(`Stored flight booking from message: ${messageId}`);
-          }
-        } catch (error) {
-          console.error(`Error processing message ${messageId}:`, error);
+        } catch (err) {
+          console.error(`gmailWebhook: Error processing message ${messageId}:`, err);
+          continue;
         }
       }
 
-      // Update history ID
+      // Recompute aggregates for affected months
+      const affectedYears: Set<number> = new Set();
+      for (const ym of affectedMonths) {
+        try {
+          await computeMonthlyAggregate(userId, ym);
+          affectedYears.add(parseInt(ym.split('-')[0], 10));
+        } catch (err) {
+          console.error(`gmailWebhook: Error computing aggregate for ${ym}:`, err);
+        }
+      }
+
+      for (const yr of affectedYears) {
+        try {
+          await computeYearlyAggregate(userId, yr);
+        } catch (err) {
+          console.error(`gmailWebhook: Error computing yearly aggregate for ${yr}:`, err);
+        }
+      }
+
+      // Update the historyId to the latest value
       await db.collection('users').doc(userId).update({
         gmailWatchHistoryId: historyId,
       });
 
-      console.log(`Finished processing for user: ${userId}`);
-    } catch (error) {
-      console.error('Error in Gmail webhook:', error);
+      console.log(`gmailWebhook: Finished processing for user ${userId}`);
+    } catch (error: any) {
+      console.error(`gmailWebhook: Error for user ${userId}:`, error);
+
+      // Still try to update historyId so we don't replay on next notification
+      try {
+        await db.collection('users').doc(userId).update({
+          gmailWatchHistoryId: historyId,
+        });
+      } catch (_updateErr) {
+        console.error('gmailWebhook: Failed to update historyId after error');
+      }
     }
   });
 
+// ============================================
+// 3. onTransactionWrite — Firestore Trigger
+// ============================================
+
 /**
- * Cirium Alert Webhook
- * Receives flight status updates from Cirium Alerts API
+ * Fires whenever a transaction document is created, updated, or deleted.
+ *
+ * Recomputes the monthly and yearly aggregates for the affected period
+ * so that dashboards always show up-to-date totals and breakdowns.
  */
-export const ciriumAlertWebhook = functions
+export const onTransactionWrite = functions
   .runWith({
-    timeoutSeconds: 30,
-    memory: '256MB',
+    timeoutSeconds: 60,
+    memory: '512MB',
   })
-  .https.onRequest(async (req, res) => {
-    // Only accept POST requests
-    if (req.method !== 'POST') {
-      res.status(405).send('Method Not Allowed');
+  .firestore.document('users/{userId}/transactions/{transactionId}')
+  .onWrite(async (change, context) => {
+    const userId = context.params.userId;
+
+    // Determine the affected date(s)
+    // On delete, use the "before" data; on create/update, use the "after" data
+    const affectedMonths: Set<string> = new Set();
+
+    // Check the "after" snapshot (exists for create and update)
+    if (change.after.exists) {
+      const afterData = change.after.data();
+      if (afterData?.date) {
+        const d = afterData.date.toDate ? afterData.date.toDate() : new Date(afterData.date);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        affectedMonths.add(ym);
+      }
+    }
+
+    // Check the "before" snapshot (exists for update and delete)
+    if (change.before.exists) {
+      const beforeData = change.before.data();
+      if (beforeData?.date) {
+        const d = beforeData.date.toDate ? beforeData.date.toDate() : new Date(beforeData.date);
+        const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        affectedMonths.add(ym);
+      }
+    }
+
+    if (affectedMonths.size === 0) {
+      console.warn(
+        `onTransactionWrite: No date found on transaction ${context.params.transactionId}, skipping aggregation`
+      );
       return;
     }
 
-    console.log('Received Cirium alert:', JSON.stringify(req.body));
+    console.log(
+      `onTransactionWrite: Recomputing aggregates for user ${userId}, months: ${[...affectedMonths].join(', ')}`
+    );
 
-    try {
-      const alertData = req.body;
+    // Recompute monthly aggregates
+    const affectedYears: Set<number> = new Set();
+    for (const ym of affectedMonths) {
+      try {
+        await computeMonthlyAggregate(userId, ym);
+        affectedYears.add(parseInt(ym.split('-')[0], 10));
+      } catch (err) {
+        console.error(`onTransactionWrite: Error computing monthly aggregate for ${ym}:`, err);
+      }
+    }
 
-      // Extract flight info from alert
-      const flightNumber = `${alertData.carrierFsCode}${alertData.flightNumber}`;
-      const departureAirport = alertData.departureAirportFsCode;
-      const arrivalAirport = alertData.arrivalAirportFsCode;
-      const ruleId = alertData.rule?.id;
+    // Recompute yearly aggregates
+    for (const yr of affectedYears) {
+      try {
+        await computeYearlyAggregate(userId, yr);
+      } catch (err) {
+        console.error(`onTransactionWrite: Error computing yearly aggregate for ${yr}:`, err);
+      }
+    }
 
-      // Determine event type from alert
-      let eventType = 'STATUS_UPDATE';
-      const details: any = {
-        departureAirport,
-        arrivalAirport,
-      };
-
-      // Parse the alert event
-      if (alertData.event) {
-        const event = alertData.event;
-
-        if (event.type === 'DEPARTURE') {
-          eventType = 'DEPARTURE';
-        } else if (event.type === 'ARRIVAL') {
-          eventType = 'ARRIVAL';
-        } else if (event.type === 'CANCELLATION') {
-          eventType = 'CANCELLATION';
-        } else if (event.type === 'DIVERSION') {
-          eventType = 'DIVERSION';
-          details.diversionAirport = event.diversionAirport;
-        } else if (event.type === 'DELAY' || event.type === 'DEPARTURE_DELAY') {
-          eventType = 'DELAY';
-          details.delayMinutes = event.delayMinutes;
-        } else if (event.type === 'GATE_DEPARTURE' || event.type === 'GATE_CHANGE') {
-          eventType = 'GATE_CHANGE';
-          details.newGate = event.gate;
-        } else if (event.type === 'BAGGAGE') {
-          eventType = 'BAGGAGE';
-          details.baggageBelt = event.baggage;
+    // Update account transaction count if this was a delete
+    if (!change.after.exists && change.before.exists) {
+      const beforeData = change.before.data();
+      if (beforeData?.accountId) {
+        try {
+          const db = admin.firestore();
+          await db
+            .collection('users')
+            .doc(userId)
+            .collection('accounts')
+            .doc(beforeData.accountId)
+            .update({
+              transactionCount: admin.firestore.FieldValue.increment(-1),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+        } catch (err) {
+          console.error(
+            `onTransactionWrite: Error decrementing account count for ${beforeData.accountId}:`,
+            err
+          );
         }
       }
-
-      // Find users tracking this flight
-      const db = admin.firestore();
-      const flightsSnapshot = await db
-        .collectionGroup('flights')
-        .where('ciriumAlertRuleId', '==', ruleId)
-        .get();
-
-      if (flightsSnapshot.empty) {
-        console.log(`No users found tracking alert rule: ${ruleId}`);
-        res.status(200).send('OK - No users tracking');
-        return;
-      }
-
-      // Send notifications to all users tracking this flight
-      const fcmService = new FcmService();
-      const notification = FcmService.formatFlightStatusNotification(
-        flightNumber,
-        eventType,
-        details
-      );
-
-      let successCount = 0;
-      for (const flightDoc of flightsSnapshot.docs) {
-        const userId = flightDoc.ref.parent.parent?.id;
-        if (userId) {
-          const sent = await fcmService.sendToUser(userId, notification);
-          successCount += sent;
-
-          // Update flight document with latest status
-          await flightDoc.ref.update({
-            lastAlertType: eventType,
-            lastAlertAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastAlertDetails: details,
-          });
-        }
-      }
-
-      console.log(`Sent ${successCount} notifications for ${flightNumber} ${eventType}`);
-      res.status(200).send('OK');
-    } catch (error) {
-      console.error('Error processing Cirium alert:', error);
-      res.status(500).send('Internal Server Error');
     }
   });
 
+// ============================================
+// 4. recomputeAggregates — Admin Recomputation
+// ============================================
+
 /**
- * Create Cirium Alert for a tracked flight
- * Called when a user adds a flight to track
+ * Recomputes ALL financial aggregates for a user.
+ *
+ * This is useful for:
+ *  - Initial setup after importing historical transactions
+ *  - Recovery after data migration or corruption
+ *  - Correcting drift from missed trigger events
+ *
+ * Scans all transactions for the user, groups them by month,
+ * and rebuilds every monthly and yearly aggregate from scratch.
  */
-export const createFlightAlert = functions
+export const recomputeAggregates = functions
   .runWith({
-    timeoutSeconds: 30,
-    memory: '256MB',
+    timeoutSeconds: 540,
+    memory: '1GB',
   })
-  .https.onCall(async (data, context) => {
+  .https.onCall(async (_data, context) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
         'User must be authenticated'
-      );
-    }
-
-    const { flightId, carrier, flightNumber, departureAirport, departureDate } = data;
-
-    if (!flightId || !carrier || !flightNumber || !departureAirport || !departureDate) {
-      throw new functions.https.HttpsError(
-        'invalid-argument',
-        'Missing required flight information'
       );
     }
 
     const userId = context.auth.uid;
-    console.log(`Creating Cirium alert for ${carrier}${flightNumber} for user ${userId}`);
+    console.log(`recomputeAggregates: Starting full recomputation for user ${userId}`);
 
     try {
-      // Parse departure date
-      const date = new Date(departureDate);
-      const year = date.getFullYear();
-      const month = date.getMonth() + 1;
-      const day = date.getDate();
+      const db = admin.firestore();
 
-      // Create Cirium alert
-      const ciriumService = new CiriumAlertService(CIRIUM_WEBHOOK_URL);
-      const result = await ciriumService.createAlert(
-        carrier,
-        flightNumber,
-        departureAirport,
-        year,
-        month,
-        day
-      );
+      // Fetch ALL transactions for this user
+      const transactionsRef = db
+        .collection('users')
+        .doc(userId)
+        .collection('transactions');
 
-      if (!result) {
-        throw new functions.https.HttpsError(
-          'internal',
-          'Failed to create Cirium alert'
-        );
+      const allTxns = await transactionsRef.get();
+
+      if (allTxns.empty) {
+        console.log(`recomputeAggregates: No transactions found for user ${userId}`);
+        return { success: true, monthsProcessed: 0, yearsProcessed: 0 };
       }
 
-      // Store alert rule ID in flight document
-      const db = admin.firestore();
-      await db.collection('users').doc(userId).collection('flights').doc(flightId).update({
-        ciriumAlertRuleId: result.rule.id,
-        ciriumAlertCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        alertCapabilities: result.alertCapabilities,
-      });
+      // Group transaction dates into unique YYYY-MM periods
+      const months: Set<string> = new Set();
+      for (const doc of allTxns.docs) {
+        const txn = doc.data();
+        if (txn.date) {
+          const d = txn.date.toDate ? txn.date.toDate() : new Date(txn.date);
+          const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+          months.add(ym);
+        }
+      }
 
-      console.log(`Created Cirium alert ${result.rule.id} for flight ${flightId}`);
+      console.log(
+        `recomputeAggregates: Found ${allTxns.size} transactions across ${months.size} months`
+      );
+
+      // Delete existing aggregates to start fresh
+      const aggregatesRef = db
+        .collection('users')
+        .doc(userId)
+        .collection('financialAggregates');
+
+      const existingAggregates = await aggregatesRef.get();
+      const deleteBatch = db.batch();
+      for (const doc of existingAggregates.docs) {
+        deleteBatch.delete(doc.ref);
+      }
+      await deleteBatch.commit();
+
+      // Recompute monthly aggregates
+      const years: Set<number> = new Set();
+      for (const ym of months) {
+        await computeMonthlyAggregate(userId, ym);
+        years.add(parseInt(ym.split('-')[0], 10));
+      }
+
+      // Recompute yearly aggregates
+      for (const yr of years) {
+        await computeYearlyAggregate(userId, yr);
+      }
+
+      // Also recompute account transaction counts
+      const accountCounts: Record<string, number> = {};
+      for (const doc of allTxns.docs) {
+        const txn = doc.data();
+        if (txn.accountId) {
+          accountCounts[txn.accountId] = (accountCounts[txn.accountId] || 0) + 1;
+        }
+      }
+
+      const accountsRef = db
+        .collection('users')
+        .doc(userId)
+        .collection('accounts');
+
+      for (const [accountId, count] of Object.entries(accountCounts)) {
+        try {
+          await accountsRef.doc(accountId).update({
+            transactionCount: count,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } catch (err) {
+          console.warn(
+            `recomputeAggregates: Could not update account ${accountId} count:`,
+            err
+          );
+        }
+      }
+
+      console.log(
+        `recomputeAggregates: Completed for user ${userId}. ` +
+        `${months.size} months, ${years.size} years recomputed.`
+      );
 
       return {
         success: true,
-        ruleId: result.rule.id,
-        alertCapabilities: result.alertCapabilities,
+        monthsProcessed: months.size,
+        yearsProcessed: years.size,
+        totalTransactions: allTxns.size,
       };
     } catch (error: any) {
-      console.error('Error creating flight alert:', error);
+      console.error('recomputeAggregates error:', error);
       throw new functions.https.HttpsError(
         'internal',
-        `Failed to create flight alert: ${error.message}`
+        `Failed to recompute aggregates: ${error.message}`
       );
     }
   });
 
+// ============================================
+// 5. askFinanceAI — AI Chat
+// ============================================
+
 /**
- * Delete Cirium Alert when flight is removed
+ * Two-call AI chat pattern:
+ *  1. Classify the question to determine what data is needed (Claude Haiku)
+ *  2. Load relevant data from Firestore (no AI)
+ *  3. Generate answer with focused context (Claude Sonnet)
+ *
+ * Includes rate limiting (30/hour, 200/day) and session management.
  */
-export const deleteFlightAlert = functions
+export const askFinanceAI = functions
   .runWith({
-    timeoutSeconds: 30,
-    memory: '256MB',
+    timeoutSeconds: 60,
+    memory: '512MB',
   })
-  .https.onCall(async (data, context) => {
+  .https.onCall(async (data: AskFinanceAIRequest, context) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -671,255 +1307,43 @@ export const deleteFlightAlert = functions
       );
     }
 
-    const { ruleId } = data;
+    const userId = context.auth.uid;
+    const { question, sessionId } = data;
 
-    if (!ruleId) {
+    if (!question || typeof question !== 'string' || question.trim().length === 0) {
       throw new functions.https.HttpsError(
         'invalid-argument',
-        'Rule ID is required'
+        'question is required and must be a non-empty string'
       );
     }
 
-    console.log(`Deleting Cirium alert: ${ruleId}`);
+    if (!ANTHROPIC_API_KEY) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'ANTHROPIC_API_KEY is not configured'
+      );
+    }
+
+    console.log(`askFinanceAI: user=${userId}, question="${question.substring(0, 80)}"`);
 
     try {
-      const ciriumService = new CiriumAlertService(CIRIUM_WEBHOOK_URL);
-      const success = await ciriumService.deleteAlert(ruleId);
+      const chatService = new AIChatService(ANTHROPIC_API_KEY);
+      const result = await chatService.askQuestion(userId, question.trim(), sessionId);
 
-      return { success };
+      return {
+        answer: result.answer,
+        sessionId: result.sessionId,
+      };
     } catch (error: any) {
-      console.error('Error deleting flight alert:', error);
+      // Re-throw HttpsErrors as-is (e.g., rate limit errors)
+      if (error instanceof functions.https.HttpsError) {
+        throw error;
+      }
+
+      console.error('askFinanceAI error:', error);
       throw new functions.https.HttpsError(
         'internal',
-        `Failed to delete flight alert: ${error.message}`
+        `Failed to process question: ${error.message}`
       );
     }
   });
-
-/**
- * Firestore trigger: Auto-create Cirium alert when flight is added
- * Also fetches and stores flight performance ratings
- */
-export const onFlightCreated = functions.firestore
-  .document('users/{userId}/flights/{flightId}')
-  .onCreate(async (snapshot, context) => {
-    const { userId } = context.params;
-    const flightData = snapshot.data();
-
-    const carrier = flightData.carrierFsCode || '';
-    const flightNumber = flightData.flightNumber || '';
-    const fullFlightNumber = `${carrier}${flightNumber}`;
-    const departureAirport = flightData.originAirport;
-    const arrivalAirport = flightData.destinationAirport;
-    const originCity = flightData.originCity || departureAirport;
-    const destinationCity = flightData.destinationCity || arrivalAirport;
-    const departureDate = flightData.departureDate || flightData.departureTime?.split('T')[0];
-
-    // Send "Flight Added" notification
-    console.log(`Sending flight added notification for ${fullFlightNumber} to user ${userId}`);
-    try {
-      const fcmService = new FcmService();
-      const notification = {
-        title: 'Flight Added',
-        body: `${fullFlightNumber} from ${originCity} to ${destinationCity} has been added to your trips`,
-        data: {
-          type: 'flight_added',
-          flightNumber: fullFlightNumber,
-          origin: originCity,
-          destination: destinationCity,
-        },
-      };
-      await fcmService.sendToUser(userId, notification);
-    } catch (error) {
-      console.error('Error sending flight added notification:', error);
-    }
-
-    // Fetch and store Cirium data (ratings, flight status, weather, equipment)
-    if (carrier && flightNumber && departureDate) {
-      console.log(`Fetching Cirium data for ${fullFlightNumber}`);
-
-      const ciriumData: Record<string, any> = {};
-      const date = new Date(departureDate);
-      const year = date.getFullYear();
-      const month = date.getMonth() + 1;
-      const day = date.getDate();
-
-      // Fetch all data in parallel
-      const [ratingsResult, flightStatusResult, depWeatherResult, arrWeatherResult] = await Promise.all([
-        // 1. Performance ratings
-        (async () => {
-          try {
-            const ratingsService = new CiriumRatingsService();
-            const rating = await ratingsService.getFlightRatings(carrier, flightNumber, departureAirport, arrivalAirport);
-            if (rating) {
-              return ratingsService.formatForStorage(rating);
-            }
-          } catch (e) { console.error('Error fetching ratings:', e); }
-          return null;
-        })(),
-
-        // 2. Flight status
-        (async () => {
-          try {
-            const flightStatusService = new CiriumFlightStatusService();
-            const result = await flightStatusService.getFlightStatus(carrier, flightNumber, year, month, day);
-            if (result) {
-              return flightStatusService.formatForStorage(result.status, result.appendix);
-            }
-          } catch (e) { console.error('Error fetching flight status:', e); }
-          return null;
-        })(),
-
-        // 3. Departure airport weather
-        (async () => {
-          if (!departureAirport) return null;
-          try {
-            const weatherService = new CiriumWeatherService();
-            const weather = await weatherService.getAirportWeather(departureAirport);
-            if (weather) {
-              return weatherService.formatForStorage(weather, departureAirport);
-            }
-          } catch (e) { console.error('Error fetching departure weather:', e); }
-          return null;
-        })(),
-
-        // 4. Arrival airport weather
-        (async () => {
-          if (!arrivalAirport) return null;
-          try {
-            const weatherService = new CiriumWeatherService();
-            const weather = await weatherService.getAirportWeather(arrivalAirport);
-            if (weather) {
-              return weatherService.formatForStorage(weather, arrivalAirport);
-            }
-          } catch (e) { console.error('Error fetching arrival weather:', e); }
-          return null;
-        })(),
-      ]);
-
-      // Store ratings
-      if (ratingsResult) {
-        ciriumData.performanceRating = ratingsResult;
-        console.log(`Stored performance rating: ${ratingsResult.ontimePercent}% on-time`);
-      }
-
-      // Store flight status (includes equipment info)
-      if (flightStatusResult) {
-        ciriumData.flightStatus = flightStatusResult;
-        console.log(`Stored flight status: ${flightStatusResult.status}`);
-
-        // If flight status has equipment, fetch detailed equipment info
-        if (flightStatusResult.equipmentCode) {
-          try {
-            const equipmentService = new CiriumEquipmentService();
-            const equipment = await equipmentService.getEquipment(flightStatusResult.equipmentCode);
-            if (equipment) {
-              ciriumData.equipment = equipmentService.formatForStorage(equipment);
-              console.log(`Stored equipment: ${ciriumData.equipment.name}`);
-            }
-          } catch (e) { console.error('Error fetching equipment:', e); }
-        }
-      }
-
-      // Store weather
-      if (depWeatherResult || arrWeatherResult) {
-        ciriumData.weather = {
-          departure: depWeatherResult,
-          arrival: arrWeatherResult,
-        };
-        console.log(`Stored weather for ${departureAirport}/${arrivalAirport}`);
-      }
-
-      // Update flight document with all Cirium data
-      if (Object.keys(ciriumData).length > 0) {
-        await snapshot.ref.update(ciriumData);
-        console.log(`Updated flight with Cirium data: ${Object.keys(ciriumData).join(', ')}`);
-      }
-    }
-
-    // Skip Cirium alert if already exists or if it's from Gmail webhook
-    if (flightData.ciriumAlertRuleId || flightData.source === 'gmail') {
-      return;
-    }
-
-    if (!carrier || !flightNumber || !departureAirport || !departureDate) {
-      console.log('Missing flight info for Cirium alert, skipping');
-      return;
-    }
-
-    console.log(`Auto-creating Cirium alert for ${fullFlightNumber}`);
-
-    try {
-      const date = new Date(departureDate);
-      const year = date.getFullYear();
-      const month = date.getMonth() + 1;
-      const day = date.getDate();
-
-      const ciriumService = new CiriumAlertService(CIRIUM_WEBHOOK_URL);
-      const result = await ciriumService.createAlert(
-        carrier,
-        flightNumber,
-        departureAirport,
-        year,
-        month,
-        day
-      );
-
-      if (result) {
-        await snapshot.ref.update({
-          ciriumAlertRuleId: result.rule.id,
-          ciriumAlertCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          alertCapabilities: result.alertCapabilities,
-        });
-
-        console.log(`Created Cirium alert ${result.rule.id} for new flight`);
-      }
-    } catch (error) {
-      console.error('Error auto-creating Cirium alert:', error);
-    }
-  });
-
-/**
- * Firestore trigger: Auto-delete Cirium alert when flight is removed
- */
-export const onFlightDeleted = functions.firestore
-  .document('users/{userId}/flights/{flightId}')
-  .onDelete(async (snapshot) => {
-    const flightData = snapshot.data();
-    const ruleId = flightData.ciriumAlertRuleId;
-
-    if (!ruleId) {
-      return;
-    }
-
-    console.log(`Auto-deleting Cirium alert: ${ruleId}`);
-
-    try {
-      const ciriumService = new CiriumAlertService(CIRIUM_WEBHOOK_URL);
-      await ciriumService.deleteAlert(ruleId);
-      console.log(`Deleted Cirium alert ${ruleId}`);
-    } catch (error) {
-      console.error('Error auto-deleting Cirium alert:', error);
-    }
-  });
-
-// ============================================
-// TRAIN FUNCTIONS
-// ============================================
-// Export all train-related functions from the trains module
-export {
-  getTrainPnrStatus,
-  getTrainSchedule,
-  getTrainLiveStatus,
-  searchTrains,
-  addTrainBooking,
-  getUserTrains,
-  refreshTrainStatus,
-  deleteTrainBooking,
-  onTrainCreated,
-} from './trains/index';
-
-// ============================================
-// LIVE ACTIVITY FUNCTIONS
-// ============================================
-export { onFlightAlertUpdated } from './liveActivity/index';

@@ -38,7 +38,7 @@ const googleapis_1 = require("googleapis");
 const admin = __importStar(require("firebase-admin"));
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GMAIL_PUBSUB_TOPIC = process.env.GMAIL_PUBSUB_TOPIC || 'projects/airtime-4e65f/topics/gmail-notifications';
+const GMAIL_PUBSUB_TOPIC = process.env.GMAIL_PUBSUB_TOPIC || 'projects/moneytest-app/topics/gmail-notifications';
 /**
  * Gmail Watch Service
  * Manages Gmail push notification subscriptions
