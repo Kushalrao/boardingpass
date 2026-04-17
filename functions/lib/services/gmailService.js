@@ -38,7 +38,6 @@ class GmailService {
             if (!msgRef.id)
                 continue;
             try {
-                // Fetch full email
                 const email = await this.gmail.users.messages.get({
                     userId: 'me',
                     id: msgRef.id,
@@ -48,13 +47,8 @@ class GmailService {
                 const subjectHeader = headers.find((h) => h.name?.toLowerCase() === 'subject');
                 const fromHeader = headers.find((h) => h.name?.toLowerCase() === 'from');
                 const dateHeader = headers.find((h) => h.name?.toLowerCase() === 'date');
-                // Extract body content
-                let bodyContent = '';
-                const bodyData = email.data.payload?.parts?.[0]?.body?.data ||
-                    email.data.payload?.body?.data;
-                if (bodyData) {
-                    bodyContent = Buffer.from(bodyData, 'base64').toString('utf-8');
-                }
+                // Extract body content (text/plain preferred, HTML fallback)
+                const bodyContent = extractBody(email.data.payload);
                 // Find PDF attachments
                 const pdfAttachments = [];
                 this.findPdfParts(email.data.payload, pdfAttachments);
@@ -100,13 +94,8 @@ class GmailService {
             const subjectHeader = headers.find((h) => h.name?.toLowerCase() === 'subject');
             const fromHeader = headers.find((h) => h.name?.toLowerCase() === 'from');
             const dateHeader = headers.find((h) => h.name?.toLowerCase() === 'date');
-            // Extract body content
-            let bodyContent = '';
-            const bodyData = email.data.payload?.parts?.[0]?.body?.data ||
-                email.data.payload?.body?.data;
-            if (bodyData) {
-                bodyContent = Buffer.from(bodyData, 'base64').toString('utf-8');
-            }
+            // Extract body content (text/plain preferred, HTML fallback)
+            const bodyContent = extractBody(email.data.payload);
             // Find PDF attachments
             const pdfAttachments = [];
             this.findPdfParts(email.data.payload, pdfAttachments);
@@ -141,4 +130,64 @@ class GmailService {
     }
 }
 exports.GmailService = GmailService;
+// ============================================
+// Body extraction helpers
+// ============================================
+/**
+ * Extracts body text from an email payload.
+ * Prefers text/plain, falls back to HTML with tag stripping.
+ */
+function extractBody(payload) {
+    if (!payload)
+        return '';
+    // Try text/plain first
+    const plainPart = findPartByMimeType(payload, 'text/plain');
+    if (plainPart?.body?.data) {
+        return Buffer.from(plainPart.body.data, 'base64').toString('utf-8');
+    }
+    // Fallback: text/html with tag stripping
+    const htmlPart = findPartByMimeType(payload, 'text/html');
+    if (htmlPart?.body?.data) {
+        const html = Buffer.from(htmlPart.body.data, 'base64').toString('utf-8');
+        return stripHtmlTags(html);
+    }
+    // Last resort: root body data (simple non-multipart emails)
+    if (payload.body?.data) {
+        return Buffer.from(payload.body.data, 'base64').toString('utf-8');
+    }
+    return '';
+}
+/**
+ * Recursively finds a MIME part by type in the email payload tree.
+ */
+function findPartByMimeType(payload, mimeType) {
+    if (payload.mimeType === mimeType && payload.body?.data) {
+        return payload;
+    }
+    if (payload.parts) {
+        for (const part of payload.parts) {
+            const found = findPartByMimeType(part, mimeType);
+            if (found)
+                return found;
+        }
+    }
+    return undefined;
+}
+/**
+ * Basic HTML tag stripping for keyword detection.
+ * Not a full parser — just enough to extract readable text.
+ */
+function stripHtmlTags(html) {
+    return html
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '') // Remove style blocks
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '') // Remove script blocks
+        .replace(/<[^>]+>/g, ' ') // Remove tags
+        .replace(/&nbsp;/gi, ' ') // Replace &nbsp;
+        .replace(/&amp;/gi, '&') // Replace &amp;
+        .replace(/&lt;/gi, '<') // Replace &lt;
+        .replace(/&gt;/gi, '>') // Replace &gt;
+        .replace(/&#?\w+;/g, ' ') // Remove other HTML entities
+        .replace(/\s+/g, ' ') // Collapse whitespace
+        .trim();
+}
 //# sourceMappingURL=gmailService.js.map

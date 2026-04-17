@@ -231,33 +231,4 @@ class AuthService {
     return await firebaseUser?.getIdToken();
   }
 
-  /// Store date of birth for PDF password resolution
-  Future<void> storeDateOfBirth(DateTime dob) async {
-    if (firebaseUser == null) return;
-
-    try {
-      await _firestore
-          .collection('users')
-          .doc(firebaseUser!.uid)
-          .update({'dateOfBirth': Timestamp.fromDate(dob)});
-      debugPrint('[AuthService] DOB stored successfully');
-    } catch (e) {
-      debugPrint('[AuthService] Error storing DOB: $e');
-    }
-  }
-
-  /// Check if user has stored their date of birth
-  Future<bool> hasDateOfBirth() async {
-    if (firebaseUser == null) return false;
-
-    try {
-      final doc = await _firestore
-          .collection('users')
-          .doc(firebaseUser!.uid)
-          .get();
-      return doc.data()?['dateOfBirth'] != null;
-    } catch (e) {
-      return false;
-    }
-  }
 }

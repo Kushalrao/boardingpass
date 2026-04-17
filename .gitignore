@@ -56,3 +56,7 @@ node_modules/
 # iOS
 ios/Pods/
 ios/.symlinks/
+
+# Test output (contains personal email data)
+functions/detected_flights.json
+functions/grouped_flights.json

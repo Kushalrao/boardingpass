@@ -2,37 +2,13 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can read their own document
+    // Users can read/write their own document
     match /users/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
       allow write: if request.auth != null && request.auth.uid == userId;
 
-      // Transactions — read-only from client
-      match /transactions/{txnId} {
-        allow read: if request.auth != null && request.auth.uid == userId;
-        allow write: if false;
-      }
-
-      // Accounts — read-only from client
-      match /accounts/{accId} {
-        allow read: if request.auth != null && request.auth.uid == userId;
-        allow write: if false;
-      }
-
-      // Financial aggregates — read-only from client
-      match /financialAggregates/{aggId} {
-        allow read: if request.auth != null && request.auth.uid == userId;
-        allow write: if false;
-      }
-
-      // Chat sessions — read-only from client
-      match /chatSessions/{sessionId} {
-        allow read: if request.auth != null && request.auth.uid == userId;
-        allow write: if false;
-      }
-
-      // Rate limits — read-only from client
-      match /rateLimits/{limitId} {
+      // Detected flight emails — read-only from client, server writes
+      match /detectedFlightEmails/{emailId} {
         allow read: if request.auth != null && request.auth.uid == userId;
         allow write: if false;
       }
