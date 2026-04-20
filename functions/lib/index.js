@@ -106,7 +106,7 @@ exports.storeRefreshToken = functions
     const userId = context.auth.uid;
     console.log(`Storing refresh token for user: ${userId}`);
     try {
-        const oauth2Client = new googleapis_1.google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, '');
+        const oauth2Client = new googleapis_1.google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, 'postmessage');
         const { tokens } = await oauth2Client.getToken(authCode);
         if (!tokens.refresh_token) {
             throw new functions.https.HttpsError('failed-precondition', 'No refresh token returned. User may need to revoke app access and re-authorize.');
@@ -287,9 +287,15 @@ exports.scanFlightEmails = functions
     const batchSize = Math.min(data?.batchSize || 20, 50);
     console.log(`scanFlightEmails: user=${userId}, batch=${batch}, batchSize=${batchSize}`);
     try {
-        // Get access token via refresh token
-        const watchService = new gmailWatchService_1.GmailWatchService();
-        const accessToken = await watchService.getAccessToken(userId);
+        // Use provided access token (web) or get one from refresh token (mobile)
+        let accessToken;
+        if (data?.accessToken) {
+            accessToken = data.accessToken;
+        }
+        else {
+            const watchService = new gmailWatchService_1.GmailWatchService();
+            accessToken = await watchService.getAccessToken(userId);
+        }
         const gmailService = new gmailService_1.GmailService(accessToken);
         // Gmail search query — broad first pass, scorer does precise filtering
         const query = [

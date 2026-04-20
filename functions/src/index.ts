@@ -99,7 +99,7 @@ export const storeRefreshToken = functions
       const oauth2Client = new google.auth.OAuth2(
         GOOGLE_CLIENT_ID,
         GOOGLE_CLIENT_SECRET,
-        ''
+        'postmessage'
       );
 
       const { tokens } = await oauth2Client.getToken(authCode);
@@ -315,7 +315,7 @@ export const scanFlightEmails = functions
     timeoutSeconds: 300,
     memory: '512MB',
   })
-  .https.onCall(async (data: { batch?: number; batchSize?: number }, context) => {
+  .https.onCall(async (data: { batch?: number; batchSize?: number; accessToken?: string }, context) => {
     if (!context.auth) {
       throw new functions.https.HttpsError(
         'unauthenticated',
@@ -330,9 +330,14 @@ export const scanFlightEmails = functions
     console.log(`scanFlightEmails: user=${userId}, batch=${batch}, batchSize=${batchSize}`);
 
     try {
-      // Get access token via refresh token
-      const watchService = new GmailWatchService();
-      const accessToken = await watchService.getAccessToken(userId);
+      // Use provided access token (web) or get one from refresh token (mobile)
+      let accessToken: string;
+      if (data?.accessToken) {
+        accessToken = data.accessToken;
+      } else {
+        const watchService = new GmailWatchService();
+        accessToken = await watchService.getAccessToken(userId);
+      }
       const gmailService = new GmailService(accessToken);
 
       // Gmail search query — broad first pass, scorer does precise filtering
