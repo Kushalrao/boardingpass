@@ -1570,6 +1570,7 @@
               printQueueFlight(f);
             }
             allParsedFlights = allParsedFlights.concat(newFlights);
+            _currentFlights = allParsedFlights; // Update incrementally for printer completion
           }
         }
 
@@ -1578,9 +1579,6 @@
         // Save to localStorage for returning users
         const user = auth.currentUser;
         if (user) saveFlightsLocal(user.uid, allParsedFlights);
-
-        // Store in memory for toggle/share
-        _currentFlights = allParsedFlights;
 
         printScanComplete();
 
@@ -1972,17 +1970,12 @@
 
             // Transition to list view after flash
             setTimeout(() => {
-              const user = auth.currentUser;
-              if (user) {
-                loadFlights(user.uid).then(flights => {
-                  document.getElementById('print-card').style.display = 'none';
-                  document.getElementById('flight-card').style.display = '';
-                  document.getElementById('toggle-reveal').classList.add('revealed');
-                  document.getElementById('share-reveal').classList.add('revealed');
-                  renderFlights(flights);
-                  loadAirportsData();
-                });
-              }
+              document.getElementById('print-card').style.display = 'none';
+              document.getElementById('flight-card').style.display = '';
+              document.getElementById('toggle-reveal').classList.add('revealed');
+              document.getElementById('share-reveal').classList.add('revealed');
+              renderFlights(_currentFlights);
+              loadAirportsData();
             }, 1200);
             return;
           } else {
