@@ -367,6 +367,7 @@ export const scanFlightEmails = functions
       );
 
       let detectedCount = 0;
+      const detectedFlights: any[] = [];
 
       for (const message of messages) {
         const detection = detectFlightEmail(message);
@@ -377,7 +378,22 @@ export const scanFlightEmails = functions
             `subject="${message.subject}"`
           );
 
-          await storeDetectedFlightEmail(userId, message, detection, 'batch_scan');
+          // Return data in response instead of storing in Firestore
+          const truncatedBody = message.body.length > 5000
+            ? message.body.substring(0, 5000)
+            : message.body;
+
+          detectedFlights.push({
+            subject: message.subject,
+            from: message.from,
+            date: message.date,
+            body: truncatedBody,
+            senderDomain: detection.senderDomain,
+            senderCategory: detection.senderCategory,
+            detectionScore: detection.score,
+            detectionConfidence: detection.confidence,
+          });
+
           detectedCount++;
         }
       }
@@ -394,6 +410,7 @@ export const scanFlightEmails = functions
         detectedInBatch: detectedCount,
         moreBatches,
         nextBatch: moreBatches ? batch + 1 : null,
+        detectedFlights,
       };
     } catch (error: any) {
       console.error('scanFlightEmails error:', error);

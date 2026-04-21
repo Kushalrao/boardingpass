@@ -47,9 +47,9 @@
       flex-shrink: 0;
     }
 
-    /* --- Toggle switch (3-state) --- */
+    /* --- Toggle switch (2-state) --- */
     .view-toggle {
-      width: 152px;
+      width: 104px;
       height: 42.86px;
       border-radius: 70.27px;
       background: white;
@@ -62,7 +62,7 @@
 
     .toggle-thumb {
       position: absolute;
-      width: 42px;
+      width: 48.49px;
       height: 35.84px;
       border-radius: 28.11px;
       background: black;
@@ -71,12 +71,8 @@
       transition: left 0.25s ease;
     }
 
-    .view-toggle.print-active .toggle-thumb {
-      left: 55px;
-    }
-
     .view-toggle.map-active .toggle-thumb {
-      left: 106.5px;
+      left: 52px;
     }
 
     .toggle-icon {
@@ -90,9 +86,8 @@
       justify-content: center;
     }
 
-    .toggle-icon-list { left: 11px; }
-    .toggle-icon-print { left: 63px; }
-    .toggle-icon-map { right: 11px; }
+    .toggle-icon-list { left: 14px; }
+    .toggle-icon-map { right: 14px; }
 
     .toggle-icon svg {
       width: 22px;
@@ -101,13 +96,8 @@
 
     /* Active = white, inactive = black */
     .view-toggle .toggle-icon-list svg { fill: white; }
-    .view-toggle .toggle-icon-print svg { fill: black; }
     .view-toggle .toggle-icon-map svg { fill: black; }
-    .view-toggle.print-active .toggle-icon-list svg { fill: black; }
-    .view-toggle.print-active .toggle-icon-print svg { fill: white; }
-    .view-toggle.print-active .toggle-icon-map svg { fill: black; }
     .view-toggle.map-active .toggle-icon-list svg { fill: black; }
-    .view-toggle.map-active .toggle-icon-print svg { fill: black; }
     .view-toggle.map-active .toggle-icon-map svg { fill: white; }
 
     /* --- Print card --- */
@@ -646,9 +636,6 @@
         <div class="toggle-icon toggle-icon-list">
           <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>
         </div>
-        <div class="toggle-icon toggle-icon-print">
-          <svg viewBox="0 0 24 24"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
-        </div>
         <div class="toggle-icon toggle-icon-map">
           <svg viewBox="0 0 24 24"><path d="M9 2L3 5v17l6-3 6 3 6-3V2l-6 3-6-3zM9 5.5l6 3v10l-6-3v-10z"/></svg>
         </div>
@@ -678,7 +665,7 @@
       </button>
       <p class="popup-text popup-text-1">Its a one time access request</p>
       <p class="popup-text popup-text-2">Data is used to create the pass and is never stored</p>
-      <button class="popup-signin-btn" onclick="handleFullSignIn()">Sign in with Google</button>
+      <button class="popup-signin-btn" onclick="handleFullSignIn()"><img src="assets/google_logo.svg" style="width:20px;height:20px;margin-right:10px;vertical-align:middle;" alt="">Sign in with Google</button>
     </div>
   </div>
 
@@ -690,9 +677,6 @@
         <div class="toggle-thumb"></div>
         <div class="toggle-icon toggle-icon-list">
           <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>
-        </div>
-        <div class="toggle-icon toggle-icon-print">
-          <svg viewBox="0 0 24 24"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
         </div>
         <div class="toggle-icon toggle-icon-map">
           <svg viewBox="0 0 24 24"><path d="M9 2L3 5v17l6-3 6 3 6-3V2l-6 3-6-3zM9 5.5l6 3v10l-6-3v-10z"/></svg>
@@ -774,30 +758,45 @@
     }
 
     // ============================================
-    // Haptics (iOS checkbox-switch trick + Android vibrate)
+    // Haptics (web-haptics library + raw fallback)
     // ============================================
+    let _haptics = null;
     let _hapticLabel = null;
-    (function initHaptics() {
+
+    // Raw iOS fallback: switch checkbox positioned off-screen
+    (function() {
       if (typeof document === 'undefined') return;
       const label = document.createElement('label');
+      const id = 'haptic-raw';
+      label.setAttribute('for', id);
       label.style.position = 'fixed';
       label.style.left = '-9999px';
       label.style.top = '-9999px';
-      label.style.opacity = '0';
-      label.style.pointerEvents = 'none';
+      label.style.opacity = '0.01';
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.setAttribute('switch', '');
+      input.id = id;
       label.appendChild(input);
       document.body.appendChild(label);
       _hapticLabel = label;
     })();
 
+    // Library (enhanced patterns + cross-platform)
+    (async function() {
+      try {
+        const mod = await import('./assets/web-haptics.mjs');
+        _haptics = new mod.b();
+        log('HAPTICS', 'web-haptics loaded');
+      } catch(e) {
+        log('HAPTICS', 'Library failed, using raw fallback: ' + e.message);
+      }
+    })();
+
     function triggerHaptic() {
-      // iOS: toggling a switch checkbox triggers native haptic
+      if (_haptics) _haptics.trigger('rigid');
       if (_hapticLabel) _hapticLabel.click();
-      // Android: vibrate API
-      if (navigator.vibrate) navigator.vibrate(10);
+      if (navigator.vibrate) navigator.vibrate(8);
     }
 
     // ============================================
@@ -1151,11 +1150,22 @@
       try {
         log('SHARE', 'Capturing card as image');
 
-        // No share button inside the card to hide
-
         // Remove 3D transform temporarily for clean capture
         const prevTransform = card.style.transform;
         card.style.transform = 'none';
+
+        // For globe view: snapshot WebGL canvas to a temp <img> (html2canvas can't read WebGL)
+        let globeSnapshot = null;
+        const globeCanvas = card.querySelector('canvas');
+        if (_currentView === 'map' && globeCanvas) {
+          log('SHARE', 'Snapshotting globe canvas');
+          globeSnapshot = document.createElement('img');
+          globeSnapshot.src = globeCanvas.toDataURL('image/png');
+          globeSnapshot.style.cssText = globeCanvas.style.cssText;
+          globeSnapshot.style.position = 'absolute';
+          globeCanvas.style.display = 'none';
+          globeCanvas.parentElement.insertBefore(globeSnapshot, globeCanvas);
+        }
 
         const canvas = await html2canvas(card, {
           backgroundColor: null,
@@ -1166,7 +1176,13 @@
           removeContainer: true,
         });
 
-        // Restore
+        // Restore globe canvas
+        if (globeSnapshot) {
+          globeSnapshot.remove();
+          globeCanvas.style.display = '';
+        }
+
+        // Restore transform
         card.style.transform = prevTransform;
 
         log('SHARE', 'Canvas created: ' + canvas.width + 'x' + canvas.height);
@@ -1425,19 +1441,10 @@
     // Load flights from Firestore
     // ============================================
 
-    async function loadFlights(userId) {
-      log('LOAD', 'Loading flights for uid=' + userId);
-      const snapshot = await db
-        .collection('users').doc(userId)
-        .collection('detectedFlightEmails')
-        .orderBy('detectedAt', 'desc')
-        .get();
-
-      log('LOAD', 'Firestore returned ' + snapshot.size + ' docs');
-
+    // Parse flight data from raw email objects (from Cloud Function response)
+    function parseFlightsFromRaw(rawFlights) {
       const flights = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
+      for (const data of rawFlights) {
         const subject = data.subject || '';
         const body = data.body || '';
         const senderDomain = data.senderDomain || '';
@@ -1457,12 +1464,36 @@
             time: time || '--:--',
           });
         } else {
-          log('LOAD', 'Skipped doc (missing data): airline=' + airlineCode + ' airport=' + airports.destination + ' subj="' + subject.substring(0, 60) + '"');
+          log('PARSE', 'Skipped (missing data): airline=' + airlineCode + ' airport=' + (airports.destination || 'null') + ' subj="' + subject.substring(0, 60) + '"');
         }
-      });
-
-      log('LOAD', 'Parsed ' + flights.length + ' displayable flights from ' + snapshot.size + ' docs');
+      }
+      log('PARSE', 'Parsed ' + flights.length + ' displayable flights from ' + rawFlights.length + ' raw');
       return flights;
+    }
+
+    // Save flights to localStorage (device-only, no server storage)
+    function saveFlightsLocal(userId, flights) {
+      try {
+        localStorage.setItem('bp_flights_' + userId, JSON.stringify(flights));
+        log('STORAGE', 'Saved ' + flights.length + ' flights to localStorage');
+      } catch (e) {
+        log('STORAGE', 'Failed to save: ' + e.message);
+      }
+    }
+
+    // Load flights from localStorage
+    function loadFlightsLocal(userId) {
+      try {
+        const data = localStorage.getItem('bp_flights_' + userId);
+        if (data) {
+          const flights = JSON.parse(data);
+          log('STORAGE', 'Loaded ' + flights.length + ' flights from localStorage');
+          return flights;
+        }
+      } catch (e) {
+        log('STORAGE', 'Failed to load: ' + e.message);
+      }
+      return [];
     }
 
     // ============================================
@@ -1517,7 +1548,7 @@
 
     async function runScanWithToken(accessToken) {
       log('SCAN', 'Starting scan with access token');
-      let prevFlightCount = 0;
+      let allParsedFlights = [];
 
       try {
         let batch = 1;
@@ -1527,28 +1558,30 @@
           log('SCAN', 'Calling scanFlightEmails batch=' + batch);
           const scanFn = functions.httpsCallable('scanFlightEmails', { timeout: 120000 });
           const result = await scanFn({ batch: batch, batchSize: 20, accessToken: accessToken });
-          log('SCAN', 'Batch ' + batch + ' result:', result.data);
+          log('SCAN', 'Batch ' + batch + ' result: detected=' + (result.data.detectedInBatch || 0));
           moreBatches = result.data.moreBatches || false;
           batch++;
 
-          // After each batch, load new flights and feed them to the printer
-          const user = auth.currentUser;
-          if (user && result.data.detectedInBatch > 0) {
-            const allFlights = await loadFlights(user.uid);
-            // New flights are at the start (ordered by detectedAt desc)
-            const newCount = allFlights.length - prevFlightCount;
-            if (newCount > 0) {
-              const newFlights = allFlights.slice(0, newCount);
-              log('SCAN', 'New flights this batch: ' + newFlights.length);
-              for (const f of newFlights) {
-                printQueueFlight(f);
-              }
-              prevFlightCount = allFlights.length;
+          // Parse flights directly from response (no Firestore)
+          if (result.data.detectedFlights && result.data.detectedFlights.length > 0) {
+            const newFlights = parseFlightsFromRaw(result.data.detectedFlights);
+            log('SCAN', 'New flights this batch: ' + newFlights.length);
+            for (const f of newFlights) {
+              printQueueFlight(f);
             }
+            allParsedFlights = allParsedFlights.concat(newFlights);
           }
         }
 
-        log('SCAN', 'Scan complete. Total flights: ' + prevFlightCount);
+        log('SCAN', 'Scan complete. Total flights: ' + allParsedFlights.length);
+
+        // Save to localStorage for returning users
+        const user = auth.currentUser;
+        if (user) saveFlightsLocal(user.uid, allParsedFlights);
+
+        // Store in memory for toggle/share
+        _currentFlights = allParsedFlights;
+
         printScanComplete();
 
       } catch (e) {
@@ -1569,7 +1602,7 @@
       const appScreen = document.getElementById('app-screen');
 
       if (user) {
-        // Returning user (page refresh while signed in) — load existing flights
+        // Returning user (page refresh while signed in) — load from localStorage
         log('AUTH_STATE', 'Returning user: ' + user.email);
         stopFlipBoard();
         signInScreen.style.display = 'none';
@@ -1577,15 +1610,10 @@
         appScreen.classList.remove('hidden');
         startFlipBoard();
 
-        try {
-          const flights = await loadFlights(user.uid);
-          log('AUTH_STATE', flights.length + ' flights loaded');
-          renderFlights(flights);
-          if (flights.length > 0) loadAirportsData();
-        } catch (e) {
-          log('AUTH_STATE', 'ERROR: ' + e.message);
-          showStatus('Error: ' + (e.message || e));
-        }
+        const flights = loadFlightsLocal(user.uid);
+        log('AUTH_STATE', flights.length + ' flights from localStorage');
+        renderFlights(flights);
+        if (flights.length > 0) loadAirportsData();
       } else {
         log('AUTH_STATE', 'No user — showing homepage');
         signInScreen.style.display = 'flex';
@@ -1677,16 +1705,11 @@
       const listCard = document.getElementById('home-list-card');
       const mapCard = document.getElementById('home-map-card');
 
-      toggle.classList.remove('map-active', 'print-active');
+      toggle.classList.remove('map-active');
       listCard.style.display = 'none';
       mapCard.style.display = 'none';
 
       if (_homeView === 'list') {
-        _homeView = 'print';
-        toggle.classList.add('print-active');
-        // On homepage, skip print (no print card here), just show as pass through
-        listCard.style.display = '';
-      } else if (_homeView === 'print') {
         _homeView = 'map';
         toggle.classList.add('map-active');
         mapCard.style.display = '';
@@ -1715,25 +1738,13 @@
     function toggleView() {
       const toggle = document.getElementById('view-toggle');
       const listCard = document.getElementById('flight-card');
-      const printCard = document.getElementById('print-card');
       const mapCard = document.getElementById('map-card');
 
-      // Cycle: list → print → map → list
-      toggle.classList.remove('map-active', 'print-active');
+      toggle.classList.remove('map-active');
       listCard.style.display = 'none';
-      printCard.style.display = 'none';
       mapCard.style.display = 'none';
-      stopPrintAnimation();
 
       if (_currentView === 'list') {
-        _currentView = 'print';
-        toggle.classList.add('print-active');
-        printCard.style.display = '';
-        startPrintAnimation();
-        // Feed existing flights to printer
-        for (const f of _currentFlights) printQueueFlight(f);
-        printScanComplete();
-      } else if (_currentView === 'print') {
         _currentView = 'map';
         toggle.classList.add('map-active');
         mapCard.style.display = '';
@@ -1928,6 +1939,7 @@
         sweepT += 1 / curSweepFrames;
 
         if (sweepT >= 1) {
+          triggerHaptic();
           laserX = direction === 1 ? W : 0;
           updateClip();
 
@@ -2125,7 +2137,7 @@
       const camera = new THREE.PerspectiveCamera(45, W / H, 1, 2000);
       camera.position.z = RADIUS * 3.2;
 
-      const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+      const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, preserveDrawingBuffer: true });
       renderer.setSize(W, H);
       renderer.setPixelRatio(window.devicePixelRatio || 2);
 

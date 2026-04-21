@@ -319,12 +319,26 @@ exports.scanFlightEmails = functions
         console.log(`scanFlightEmails: Fetched ${messages.length} emails (batch ${batch}), ` +
             `totalEmails=${totalEmails}, moreBatches=${moreBatches}`);
         let detectedCount = 0;
+        const detectedFlights = [];
         for (const message of messages) {
             const detection = (0, flightDetector_1.detectFlightEmail)(message);
             if (detection.isFlightEmail) {
                 console.log(`scanFlightEmails: FLIGHT DETECTED [${detection.confidence}] score=${detection.score} ` +
                     `subject="${message.subject}"`);
-                await storeDetectedFlightEmail(userId, message, detection, 'batch_scan');
+                // Return data in response instead of storing in Firestore
+                const truncatedBody = message.body.length > 5000
+                    ? message.body.substring(0, 5000)
+                    : message.body;
+                detectedFlights.push({
+                    subject: message.subject,
+                    from: message.from,
+                    date: message.date,
+                    body: truncatedBody,
+                    senderDomain: detection.senderDomain,
+                    senderCategory: detection.senderCategory,
+                    detectionScore: detection.score,
+                    detectionConfidence: detection.confidence,
+                });
                 detectedCount++;
             }
         }
@@ -337,6 +351,7 @@ exports.scanFlightEmails = functions
             detectedInBatch: detectedCount,
             moreBatches,
             nextBatch: moreBatches ? batch + 1 : null,
+            detectedFlights,
         };
     }
     catch (error) {
