@@ -500,6 +500,18 @@
       border-top: 13px solid white;
     }
 
+    .reveal-container {
+      overflow: hidden;
+      max-height: 0;
+      opacity: 0;
+      transition: max-height 0.6s ease-out, opacity 0.4s ease 0.2s;
+    }
+
+    .reveal-container.revealed {
+      max-height: 100px;
+      opacity: 1;
+    }
+
     .share-pill-btn {
       background: black;
       color: white;
@@ -672,8 +684,9 @@
 
   <!-- Main app screen -->
   <div id="app-screen" class="hidden" style="display:none; flex-direction: column; align-items: center; height: 100%; width: 100%;">
-    <div style="display:flex; justify-content:center; padding:10px 0; flex-shrink:0;">
-      <div class="view-toggle" id="view-toggle" onclick="toggleView()">
+    <div class="reveal-container revealed" id="toggle-reveal">
+      <div style="display:flex; justify-content:center; padding:10px 0; flex-shrink:0;">
+        <div class="view-toggle" id="view-toggle" onclick="toggleView()">
         <div class="toggle-thumb"></div>
         <div class="toggle-icon toggle-icon-list">
           <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>
@@ -684,6 +697,7 @@
         <div class="toggle-icon toggle-icon-map">
           <svg viewBox="0 0 24 24"><path d="M9 2L3 5v17l6-3 6 3 6-3V2l-6 3-6-3zM9 5.5l6 3v10l-6-3v-10z"/></svg>
         </div>
+      </div>
       </div>
     </div>
 
@@ -727,7 +741,9 @@
       <div id="globe-labels" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;"></div>
     </div>
 
-    <button class="share-pill-btn" onclick="shareCard()">Share</button>
+    <div class="reveal-container revealed" id="share-reveal">
+      <button class="share-pill-btn" onclick="shareCard()">Share</button>
+    </div>
   </div>
 
   <!-- Firebase SDK (compat) -->
@@ -914,6 +930,10 @@
       const m = text.match(ROUTE_RE);
       if (m) return { origin: m[1], destination: m[2] };
 
+      // Try "From To XXX YYY" pattern (IndiGo boarding passes)
+      const fromToMatch = text.match(/\bFrom\s+To\s+([A-Z]{3})\s+([A-Z]{3})\b/);
+      if (fromToMatch) return { origin: fromToMatch[1], destination: fromToMatch[2] };
+
       // Try "FROM XXX" and "TO XXX" patterns
       const fromMatch = text.match(/\bfrom\s+([A-Z]{3})\b/i);
       const toMatch = text.match(/\bto\s+([A-Z]{3})\b/);
@@ -949,7 +969,8 @@
     }
 
     function extractDate(text) {
-      for (const re of [DATE_RE_1, DATE_RE_2, DATE_RE_3, DATE_RE_4]) {
+      // Order: most specific first to avoid false matches from general patterns
+      for (const re of [DATE_RE_3, DATE_RE_4, DATE_RE_2, DATE_RE_1]) {
         const m = text.match(re);
         if (m) {
           const day = m[1];
@@ -980,6 +1001,17 @@
       // Look for time right after an IATA code (e.g., "BLR 11:30" or "DEL 21:45")
       const iataTimeMatch = text.match(/\b[A-Z]{3}\s+(\d{1,2}):(\d{2})\b/);
       if (iataTimeMatch) return iataTimeMatch[1].padStart(2, '0') + ':' + iataTimeMatch[2];
+
+      // HHMM range format (e.g., "1305-1555 hrs" — IndiGo revised itineraries)
+      const hhmmRangeMatch = text.match(/\b(\d{2})(\d{2})\s*[-–]\s*\d{4}\s*hrs?\b/);
+      if (hhmmRangeMatch) return hhmmRangeMatch[1] + ':' + hhmmRangeMatch[2];
+
+      // HHMM single format (e.g., "1305 hrs")
+      const hhmmMatch = text.match(/\b(\d{2})(\d{2})\s*hrs?\b/);
+      if (hhmmMatch) {
+        const hh = parseInt(hhmmMatch[1]);
+        if (hh >= 0 && hh <= 23) return hhmmMatch[1] + ':' + hhmmMatch[2];
+      }
 
       // Look for time in "HH:MM AM/PM" format
       const ampmMatch = text.match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
@@ -1463,11 +1495,9 @@
         appScreen.style.display = 'flex';
         appScreen.classList.remove('hidden');
 
-        // Hide toggle and share during printing
-        const toggle = document.getElementById('view-toggle');
-        const shareBtn = document.querySelector('#app-screen .share-pill-btn');
-        if (toggle) toggle.style.display = 'none';
-        if (shareBtn) shareBtn.style.display = 'none';
+        // Hide toggle and share during printing (smooth reveal later)
+        document.getElementById('toggle-reveal').classList.remove('revealed');
+        document.getElementById('share-reveal').classList.remove('revealed');
 
         // Show print card, hide others
         document.getElementById('flight-card').style.display = 'none';
@@ -1907,7 +1937,7 @@
             direction *= -1;
             sweepT = 0;
             updateGlow();
-          } else if (_printScanDone && _printQueue.length === 0) {
+          } else if (targetY >= H || (_printScanDone && _printQueue.length === 0)) {
             // Scan done and no more flights — finish
             surface.style.clipPath = 'polygon(0 0, 100% 0, 100% 100%, 0 100%)';
             head.classList.remove('active');
@@ -1935,8 +1965,8 @@
                 loadFlights(user.uid).then(flights => {
                   document.getElementById('print-card').style.display = 'none';
                   document.getElementById('flight-card').style.display = '';
-                  document.querySelector('#app-screen .view-toggle').style.display = '';
-                  document.querySelector('#app-screen .share-pill-btn').style.display = '';
+                  document.getElementById('toggle-reveal').classList.add('revealed');
+                  document.getElementById('share-reveal').classList.add('revealed');
                   renderFlights(flights);
                   loadAirportsData();
                 });
